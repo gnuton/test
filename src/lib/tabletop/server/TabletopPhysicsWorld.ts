@@ -12,7 +12,8 @@ import {
   Quaternion4D,
   PieceShapeType,
   SnapPoint,
-  JointData
+  JointData,
+  calculateDeckHeight
 } from '../types.js';
 
 interface GrabState {
@@ -111,6 +112,18 @@ export class TabletopPhysicsWorld {
       new CANNON.ContactMaterial(this.cardMaterial, this.feltMaterial, {
         friction: 0.5,
         restitution: 0.05,
+      })
+    );
+    this.world.addContactMaterial(
+      new CANNON.ContactMaterial(this.cardMaterial, this.cardMaterial, {
+        friction: 0.6,
+        restitution: 0.02,
+      })
+    );
+    this.world.addContactMaterial(
+      new CANNON.ContactMaterial(this.chipMaterial, this.chipMaterial, {
+        friction: 0.6,
+        restitution: 0.08,
       })
     );
 
@@ -414,18 +427,24 @@ export class TabletopPhysicsWorld {
         this.removePiece(piece.id);
       }
 
+      // Calculate realistic deck height (2 cards is thin ~0.015, 52 cards is ~0.265)
+      const cardCount = allCards.length;
+      const deckHeight = calculateDeckHeight(cardCount);
+      const deckBaseY = this.tableConfig.height + deckHeight / 2;
+
       // Create consolidated Deck
       const deckId = `deck_grouped_${Date.now()}`;
       const deckPiece: TabletopPieceData = {
         id: deckId,
         type: 'card_deck',
-        name: `Deck (${allCards.length} Cards)`,
-        position: { x: baseX, y: baseY, z: baseZ },
+        name: `Deck (${cardCount} Cards)`,
+        position: { x: baseX, y: deckBaseY, z: baseZ },
         rotation: { x: 0, y: 0, z: 0, w: 1 },
-        mass: 0.35,
+        dimensions: { x: 1.15, y: deckHeight, z: 1.65 },
+        mass: Math.max(0.04, Math.min(0.5, 0.02 + cardCount * 0.005)),
         color: '#1e3a8a',
-        label: `${allCards.length} CARDS`,
-        value: allCards.length,
+        label: `${cardCount} CARDS`,
+        value: cardCount,
         metadata: {
           cards: allCards,
         },
@@ -434,7 +453,7 @@ export class TabletopPhysicsWorld {
       this.addPiece(deckPiece);
 
       if (this.onSoundEventCallback) {
-        this.onSoundEventCallback('card_deal', 1.0, { x: baseX, y: baseY, z: baseZ });
+        this.onSoundEventCallback('card_deal', 1.0, { x: baseX, y: deckBaseY, z: baseZ });
       }
 
       return { createdDeck: deckPiece, removedPieceIds: removedIds };
@@ -459,45 +478,163 @@ export class TabletopPhysicsWorld {
     return { removedPieceIds: [] };
   }
 
-  // Auto-stack card onto card or deck when dropped near it
-  public checkAutoStack(pieceId: string): { createdDeck?: TabletopPieceData; removedPieceIds: string[] } | null {
+  // Auto-stack card onto card/deck, or chip onto chip when dropped near it
+  public checkAutoStack(pieceId: string): { createdDeck?: TabletopPieceData; removedPieceIds: string[]; updatedPieces?: TabletopPieceData[] } | null {
     const droppedPiece = this.pieceData.get(pieceId);
-    if (!droppedPiece || (droppedPiece.type !== 'card' && droppedPiece.type !== 'card_deck')) {
-      return null;
-    }
+    if (!droppedPiece) return null;
 
     const dropBody = this.bodies.get(pieceId);
     if (!dropBody) return null;
 
-    let targetPiece: TabletopPieceData | null = null;
-    let minDistance = 1.25;
+    // 1. Cards and Decks Stacking
+    if (droppedPiece.type === 'card' || droppedPiece.type === 'card_deck') {
+      let targetPiece: TabletopPieceData | null = null;
+      let minDistance = 0.95;
 
-    for (const [id, piece] of this.pieceData.entries()) {
-      if (id === pieceId) continue;
-      if (piece.type !== 'card' && piece.type !== 'card_deck') continue;
+      for (const [id, piece] of this.pieceData.entries()) {
+        if (id === pieceId) continue;
+        if (piece.type !== 'card' && piece.type !== 'card_deck') continue;
 
-      const body = this.bodies.get(id);
-      if (!body) continue;
+        const body = this.bodies.get(id);
+        if (!body) continue;
 
-      const dx = dropBody.position.x - body.position.x;
-      const dz = dropBody.position.z - body.position.z;
-      const dist = Math.sqrt(dx * dx + dz * dz);
+        const dx = dropBody.position.x - body.position.x;
+        const dz = dropBody.position.z - body.position.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
 
-      if (dist < minDistance && Math.abs(dropBody.position.y - body.position.y) < 1.5) {
-        minDistance = dist;
-        targetPiece = piece;
+        if (dist < minDistance && Math.abs(dropBody.position.y - body.position.y) < 1.6) {
+          minDistance = dist;
+          targetPiece = piece;
+        }
+      }
+
+      if (targetPiece) {
+        return this.groupPieces([targetPiece.id, pieceId]);
       }
     }
 
-    if (targetPiece) {
-      return this.groupPieces([targetPiece.id, pieceId]);
+    // 2. Poker Chips and Checkers Vertical Column Stacking
+    if (droppedPiece.type === 'poker_chip' || droppedPiece.type === 'checker' || droppedPiece.type === 'coin') {
+      let targetPiece: TabletopPieceData | null = null;
+      let minDistance = 0.75;
+
+      for (const [id, piece] of this.pieceData.entries()) {
+        if (id === pieceId) continue;
+        if (piece.type !== droppedPiece.type) continue;
+
+        const body = this.bodies.get(id);
+        if (!body) continue;
+
+        const dx = dropBody.position.x - body.position.x;
+        const dz = dropBody.position.z - body.position.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+
+        if (dist < minDistance && Math.abs(dropBody.position.y - body.position.y) < 2.0) {
+          minDistance = dist;
+          targetPiece = piece;
+        }
+      }
+
+      if (targetPiece) {
+        const targetX = targetPiece.position.x;
+        const targetZ = targetPiece.position.z;
+        const itemH = droppedPiece.dimensions?.y || (droppedPiece.type === 'checker' ? 0.12 : droppedPiece.type === 'coin' ? 0.05 : 0.08);
+
+        // Find highest surface in this column
+        let highestTop = targetPiece.position.y + itemH / 2;
+        for (const [id, piece] of this.pieceData.entries()) {
+          if (id === pieceId) continue;
+          if (piece.type === droppedPiece.type) {
+            const d = Math.hypot(piece.position.x - targetX, piece.position.z - targetZ);
+            if (d < 0.35) {
+              const top = piece.position.y + itemH / 2;
+              if (top > highestTop) highestTop = top;
+            }
+          }
+        }
+
+        const newY = highestTop + itemH / 2 + 0.005;
+        dropBody.position.set(targetX, newY, targetZ);
+        dropBody.quaternion.set(0, 0, 0, 1);
+        dropBody.velocity.set(0, 0, 0);
+        dropBody.angularVelocity.set(0, 0, 0);
+
+        droppedPiece.position = { x: targetX, y: newY, z: targetZ };
+        droppedPiece.rotation = { x: 0, y: 0, z: 0, w: 1 };
+
+        if (this.onSoundEventCallback) {
+          this.onSoundEventCallback(
+            droppedPiece.type === 'checker' ? 'wood_knock' : 'chip_clink',
+            0.9,
+            { x: targetX, y: newY, z: targetZ }
+          );
+        }
+
+        return { removedPieceIds: [], updatedPieces: [droppedPiece] };
+      }
+    }
+
+    // 3. Dominos & Blocks Vertical Stacking
+    if (droppedPiece.type === 'domino' || droppedPiece.type === 'block') {
+      let targetPiece: TabletopPieceData | null = null;
+      let minDistance = 0.65;
+
+      for (const [id, piece] of this.pieceData.entries()) {
+        if (id === pieceId) continue;
+        if (piece.type !== droppedPiece.type) continue;
+
+        const body = this.bodies.get(id);
+        if (!body) continue;
+
+        const dx = dropBody.position.x - body.position.x;
+        const dz = dropBody.position.z - body.position.z;
+        const dist = Math.hypot(dx, dz);
+
+        if (dist < minDistance && Math.abs(dropBody.position.y - body.position.y) < 2.0) {
+          minDistance = dist;
+          targetPiece = piece;
+        }
+      }
+
+      if (targetPiece) {
+        const targetX = targetPiece.position.x;
+        const targetZ = targetPiece.position.z;
+        const itemH = droppedPiece.dimensions?.y || (droppedPiece.type === 'domino' ? 0.15 : 0.8);
+
+        let highestTop = targetPiece.position.y + itemH / 2;
+        for (const [id, piece] of this.pieceData.entries()) {
+          if (id === pieceId) continue;
+          if (piece.type === droppedPiece.type) {
+            const d = Math.hypot(piece.position.x - targetX, piece.position.z - targetZ);
+            if (d < 0.35) {
+              const top = piece.position.y + itemH / 2;
+              if (top > highestTop) highestTop = top;
+            }
+          }
+        }
+
+        const newY = highestTop + itemH / 2 + 0.005;
+        dropBody.position.set(targetX, newY, targetZ);
+        dropBody.quaternion.set(0, 0, 0, 1);
+        dropBody.velocity.set(0, 0, 0);
+        dropBody.angularVelocity.set(0, 0, 0);
+
+        droppedPiece.position = { x: targetX, y: newY, z: targetZ };
+        droppedPiece.rotation = { x: 0, y: 0, z: 0, w: 1 };
+
+        if (this.onSoundEventCallback) {
+          this.onSoundEventCallback('wood_knock', 0.85, { x: targetX, y: newY, z: targetZ });
+        }
+
+        return { removedPieceIds: [], updatedPieces: [droppedPiece] };
+      }
     }
 
     return null;
   }
 
   private createCannonBody(data: TabletopPieceData): CANNON.Body {
-    const dims = data.dimensions || this.getDefaultDimensions(data.type);
+    const dims = data.dimensions || this.getDefaultDimensions(data.type, data);
     let shape: CANNON.Shape;
     let material = this.woodMaterial;
     let linearDamping = 0.15;
@@ -538,14 +675,14 @@ export class TabletopPhysicsWorld {
         break;
       }
       case 'card': {
-        shape = new CANNON.Box(new CANNON.Vec3(dims.x / 2, dims.y / 2, dims.z / 2));
+        shape = new CANNON.Box(new CANNON.Vec3(dims.x / 2, Math.max(0.005, dims.y / 2), dims.z / 2));
         material = this.cardMaterial;
         linearDamping = 0.4;
         angularDamping = 0.5;
         break;
       }
       case 'card_deck': {
-        shape = new CANNON.Box(new CANNON.Vec3(dims.x / 2, dims.y / 2, dims.z / 2));
+        shape = new CANNON.Box(new CANNON.Vec3(dims.x / 2, Math.max(0.007, dims.y / 2), dims.z / 2));
         material = this.cardMaterial;
         linearDamping = 0.3;
         angularDamping = 0.4;
@@ -616,7 +753,7 @@ export class TabletopPhysicsWorld {
     return body;
   }
 
-  public getDefaultDimensions(type: PieceShapeType): Vector3D {
+  public getDefaultDimensions(type: PieceShapeType, data?: TabletopPieceData): Vector3D {
     switch (type) {
       case 'dice_d6':
       case 'dice_fate':
@@ -635,11 +772,14 @@ export class TabletopPhysicsWorld {
       case 'dice_d12':
         return { x: 0.85, y: 0.85, z: 0.85 };
       case 'card':
-        return { x: 1.1, y: 0.04, z: 1.6 };
-      case 'card_deck':
-        return { x: 1.15, y: 0.6, z: 1.65 };
+        return { x: 1.1, y: 0.008, z: 1.6 };
+      case 'card_deck': {
+        const count = data?.metadata?.cards?.length || data?.value || 52;
+        const deckHeight = calculateDeckHeight(count);
+        return { x: 1.15, y: deckHeight, z: 1.65 };
+      }
       case 'poker_chip':
-        return { x: 0.75, y: 0.12, z: 0.75 };
+        return { x: 0.75, y: 0.08, z: 0.75 };
       case 'pawn':
         return { x: 0.6, y: 1.1, z: 0.6 };
       case 'meeple':
@@ -653,7 +793,7 @@ export class TabletopPhysicsWorld {
       case 'domino':
         return { x: 0.6, y: 0.15, z: 1.3 };
       case 'checker':
-        return { x: 0.7, y: 0.2, z: 0.7 };
+        return { x: 0.7, y: 0.12, z: 0.7 };
       case 'block':
       default:
         return { x: 0.8, y: 0.8, z: 0.8 };

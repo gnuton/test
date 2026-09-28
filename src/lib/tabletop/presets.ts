@@ -268,7 +268,7 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
             type: 'card',
             name: `Card ${cardLabel}`,
             label: cardLabel,
-            position: { x: colX, y: y + cardIdx * 0.02, z: -0.5 + cardIdx * 0.45 },
+            position: { x: colX, y: y + cardIdx * 0.008, z: -0.5 + cardIdx * 0.45 },
             // Top card is face up, undercards face down
             rotation: isTop ? { x: 0, y: 0, z: 0, w: 1 } : { x: 0, y: 0, z: 1, w: 0 },
             mass: 0.04,
@@ -335,7 +335,7 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
           id: `card-dealt-${idx}`,
           type: 'card',
           name: `Card ${c.label}`,
-          position: { x: c.x, y: y + idx * 0.03, z: c.z },
+          position: { x: c.x, y: y + idx * 0.008, z: c.z },
           rotation: { x: 0, y: 0, z: 0, w: 1 },
           mass: 0.04,
           label: c.label,

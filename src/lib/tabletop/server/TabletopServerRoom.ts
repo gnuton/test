@@ -451,6 +451,10 @@ export class TabletopServerRoom {
           }
           this.broadcast({ type: 'piece_spawned', piece: autoStackResult.createdDeck });
           this.addSystemMessage(`🎴 Cards stacked into deck (${autoStackResult.createdDeck.metadata?.cards?.length || 2} cards).`);
+        } else if (autoStackResult && autoStackResult.updatedPieces) {
+          for (const p of autoStackResult.updatedPieces) {
+            this.broadcast({ type: 'piece_spawned', piece: p });
+          }
         }
         break;
       }
@@ -468,6 +472,10 @@ export class TabletopServerRoom {
               this.broadcast({ type: 'piece_removed', pieceId: remId });
             }
             this.broadcast({ type: 'piece_spawned', piece: autoStackResult.createdDeck });
+          } else if (autoStackResult && autoStackResult.updatedPieces) {
+            for (const p of autoStackResult.updatedPieces) {
+              this.broadcast({ type: 'piece_spawned', piece: p });
+            }
           }
         }
         break;

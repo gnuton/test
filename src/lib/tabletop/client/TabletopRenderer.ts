@@ -17,7 +17,8 @@ import {
   JointData,
   TextLabel,
   DecalData,
-  CameraBookmark
+  CameraBookmark,
+  calculateDeckHeight
 } from '../types.js';
 
 export interface RendererEvents {
@@ -37,6 +38,7 @@ export interface RendererEvents {
   onStrokeDrawn?: (stroke: DrawingStroke) => void;
   onCounterClick?: (pieceId: string, delta: number) => void;
   onPieceInspect?: (piece: TabletopPieceData | null) => void;
+  onStackPieces?: (sourcePieceIds: string[], targetPieceId: string) => void;
 }
 
 export class TabletopRenderer {
@@ -96,6 +98,9 @@ export class TabletopRenderer {
   public mouse = new THREE.Vector2();
   public hoveredPieceId: string | null = null;
   public grabbedPieceId: string | null = null;
+  private currentDraggedY: number | null = null;
+  public activeStackTargetId: string | null = null;
+  private stackGuideMesh: THREE.Mesh | null = null;
   private dragPlane = new THREE.Plane();
   private dragPlaneIntersect = new THREE.Vector3();
   private lastDragPos = new THREE.Vector3();
@@ -178,6 +183,7 @@ export class TabletopRenderer {
     this.rebuildTable(this.currentTableConfig);
     this.setupRulerVisuals();
     this.setupFlickArrow();
+    this.setupStackGuide();
 
     // 7. Bind Events
     this.bindEvents();
@@ -538,11 +544,25 @@ export class TabletopRenderer {
   public syncPiece(data: TabletopPieceData) {
     let mesh = this.pieceMeshes.get(data.id);
 
+    // If deck card count changed, recreate mesh so its thickness and label update!
+    if (mesh && data.type === 'card_deck') {
+      const oldPiece = (mesh as any).pieceData as TabletopPieceData | undefined;
+      const oldCount = oldPiece?.metadata?.cards?.length || oldPiece?.value;
+      const newCount = data.metadata?.cards?.length || data.value;
+      if (oldCount !== newCount) {
+        this.scene.remove(mesh);
+        this.pieceMeshes.delete(data.id);
+        mesh = undefined;
+      }
+    }
+
     if (!mesh) {
       mesh = this.createPieceMesh(data);
       this.scene.add(mesh);
       this.pieceMeshes.set(data.id, mesh);
     }
+
+    (mesh as any).pieceData = data;
 
     this.pieceTargetTransforms.set(data.id, {
       pos: new THREE.Vector3(data.position.x, data.position.y, data.position.z),
@@ -748,7 +768,7 @@ export class TabletopRenderer {
 
       case 'card': {
         const w = data.dimensions?.x || 1.1;
-        const h = data.dimensions?.y || 0.04;
+        const h = data.dimensions?.y || 0.008;
         const d = data.dimensions?.z || 1.6;
         const geo = new THREE.BoxGeometry(w, h, d);
 
@@ -795,7 +815,7 @@ export class TabletopRenderer {
         }
         const backTex = new THREE.CanvasTexture(backCanvas);
 
-        const sideMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+        const sideMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.5 });
         const faceMat = new THREE.MeshStandardMaterial({ map: faceTex, roughness: 0.3 });
         const backMat = new THREE.MeshStandardMaterial({ map: backTex, roughness: 0.3 });
 
@@ -808,7 +828,9 @@ export class TabletopRenderer {
 
       case 'card_deck': {
         const w = data.dimensions?.x || 1.15;
-        const h = data.dimensions?.y || 0.6;
+        const count = data.metadata?.cards?.length || data.value || 52;
+        // Dynamic realistic card deck thickness based on card count (2 cards is ~0.015, NOT thick like a 100-card block!)
+        const h = calculateDeckHeight(count);
         const d = data.dimensions?.z || 1.65;
         const geo = new THREE.BoxGeometry(w, h, d);
 
@@ -829,37 +851,87 @@ export class TabletopRenderer {
           tctx.strokeRect(20 + i * 12, 20 + i * 16, 216 - i * 24, 320 - i * 32);
         }
 
-        // Card count badge
-        tctx.fillStyle = '#0f172a';
-        tctx.roundRect(40, 130, 176, 100, 14);
-        tctx.fill();
-        tctx.strokeStyle = '#f59e0b';
-        tctx.lineWidth = 4;
-        tctx.stroke();
+        // Card count badge: sleek and scaled to deck size!
+        if (count === 2) {
+          // 2 cards: discreet corner badge so it looks like authentic playing cards!
+          tctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+          tctx.beginPath();
+          tctx.roundRect(165, 20, 70, 38, 8);
+          tctx.fill();
+          tctx.strokeStyle = '#f59e0b';
+          tctx.lineWidth = 2.5;
+          tctx.stroke();
 
-        const count = data.metadata?.cards?.length || data.value || 52;
-        tctx.fillStyle = '#f8fafc';
-        tctx.font = 'bold 44px monospace';
-        tctx.textAlign = 'center';
-        tctx.textBaseline = 'middle';
-        tctx.fillText(`${count}`, 128, 168);
+          tctx.fillStyle = '#ffffff';
+          tctx.font = 'bold 20px monospace';
+          tctx.textAlign = 'center';
+          tctx.textBaseline = 'middle';
+          tctx.fillText(`2 🎴`, 200, 39);
+        } else if (count <= 6) {
+          // Small stack (3-6 cards): elegant compact badge
+          tctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+          tctx.beginPath();
+          tctx.roundRect(150, 20, 85, 40, 8);
+          tctx.fill();
+          tctx.strokeStyle = '#f59e0b';
+          tctx.lineWidth = 2.5;
+          tctx.stroke();
 
-        tctx.font = 'bold 20px sans-serif';
-        tctx.fillStyle = '#f59e0b';
-        tctx.fillText('CARDS', 128, 204);
+          tctx.fillStyle = '#ffffff';
+          tctx.font = 'bold 18px monospace';
+          tctx.textAlign = 'center';
+          tctx.textBaseline = 'middle';
+          tctx.fillText(`${count} CARDS`, 192, 40);
+        } else {
+          // Larger deck: centered counter
+          tctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+          tctx.beginPath();
+          tctx.roundRect(46, 130, 164, 96, 14);
+          tctx.fill();
+          tctx.strokeStyle = '#f59e0b';
+          tctx.lineWidth = 3.5;
+          tctx.stroke();
+
+          tctx.fillStyle = '#f8fafc';
+          tctx.font = 'bold 42px monospace';
+          tctx.textAlign = 'center';
+          tctx.textBaseline = 'middle';
+          tctx.fillText(`${count}`, 128, 166);
+
+          tctx.font = 'bold 18px sans-serif';
+          tctx.fillStyle = '#f59e0b';
+          tctx.fillText('CARDS', 128, 202);
+        }
 
         const topTex = new THREE.CanvasTexture(topCanvas);
 
-        // Sides Canvas (ribbed white card layers)
+        // Sides Canvas (proportional to real card layers)
         const sideCanvas = document.createElement('canvas');
         sideCanvas.width = 128;
         sideCanvas.height = 128;
         const sctx = sideCanvas.getContext('2d')!;
         sctx.fillStyle = '#f8fafc';
         sctx.fillRect(0, 0, 128, 128);
-        sctx.fillStyle = '#cbd5e1';
-        for (let py = 0; py < 128; py += 4) {
-          sctx.fillRect(0, py, 128, 1.5);
+
+        if (count === 2) {
+          // Exactly 2 cards: ONE clean hairline divider right in the middle
+          sctx.fillStyle = '#94a3b8';
+          sctx.fillRect(0, 63, 128, 2);
+        } else if (count <= 6) {
+          // Small stack: exact number of thin dividers
+          sctx.fillStyle = '#94a3b8';
+          const step = 128 / count;
+          for (let i = 1; i < count; i++) {
+            sctx.fillRect(0, Math.round(i * step), 128, 1.5);
+          }
+        } else {
+          // Realistic deck side layers
+          sctx.fillStyle = '#cbd5e1';
+          const visibleLines = Math.min(count, 32);
+          const step = 128 / visibleLines;
+          for (let i = 1; i < visibleLines; i++) {
+            sctx.fillRect(0, Math.round(i * step), 128, 1.2);
+          }
         }
         const sideTex = new THREE.CanvasTexture(sideCanvas);
         sideTex.wrapS = THREE.RepeatWrapping;
@@ -1215,6 +1287,114 @@ export class TabletopRenderer {
     if (this.rulerLabelMesh) this.rulerLabelMesh.visible = false;
   }
 
+  // Stacking Visual Guide Ring
+  private setupStackGuide() {
+    const geo = new THREE.RingGeometry(0.5, 0.65, 32);
+    geo.rotateX(-Math.PI / 2);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.8,
+      side: THREE.DoubleSide,
+      depthTest: false,
+    });
+    this.stackGuideMesh = new THREE.Mesh(geo, mat);
+    this.stackGuideMesh.renderOrder = 998;
+    this.stackGuideMesh.visible = false;
+    this.scene.add(this.stackGuideMesh);
+  }
+
+  public showStackGuide(pos: THREE.Vector3, dims: Vector3D) {
+    if (!this.stackGuideMesh) return;
+    const r = Math.max(dims.x, dims.z) * 0.62;
+    this.stackGuideMesh.scale.set(r, 1, r);
+    this.stackGuideMesh.position.set(pos.x, pos.y + dims.y / 2 + 0.02, pos.z);
+    this.stackGuideMesh.visible = true;
+  }
+
+  public hideStackGuide() {
+    if (this.stackGuideMesh) {
+      this.stackGuideMesh.visible = false;
+    }
+  }
+
+  // Calculate real piece 3D dimensions
+  public getPieceDimensions(piece?: TabletopPieceData | null): Vector3D {
+    if (!piece) return { x: 1.0, y: 0.1, z: 1.0 };
+    switch (piece.type) {
+      case 'card':
+        return { x: piece.dimensions?.x || 1.1, y: 0.008, z: piece.dimensions?.z || 1.6 };
+      case 'card_deck': {
+        const count = piece.metadata?.cards?.length || piece.value || 52;
+        const deckH = calculateDeckHeight(count);
+        return { x: piece.dimensions?.x || 1.15, y: deckH, z: piece.dimensions?.z || 1.65 };
+      }
+      case 'poker_chip':
+        return { x: piece.dimensions?.x || 0.75, y: piece.dimensions?.y || 0.08, z: piece.dimensions?.z || 0.75 };
+      case 'checker':
+        return { x: piece.dimensions?.x || 0.75, y: piece.dimensions?.y || 0.12, z: piece.dimensions?.z || 0.75 };
+      case 'coin':
+        return { x: piece.dimensions?.x || 0.8, y: piece.dimensions?.y || 0.05, z: piece.dimensions?.z || 0.8 };
+      case 'dice_d6':
+      case 'dice_fate':
+        return piece.dimensions || { x: 0.7, y: 0.7, z: 0.7 };
+      case 'dice_d20':
+      case 'dice_d12':
+      case 'dice_d10':
+      case 'dice_d8':
+      case 'dice_d4':
+        return piece.dimensions || { x: 0.85, y: 0.85, z: 0.85 };
+      case 'domino':
+        return piece.dimensions || { x: 0.6, y: 0.15, z: 1.3 };
+      case 'block':
+        return piece.dimensions || { x: 0.8, y: 0.8, z: 0.8 };
+      case 'pawn':
+      case 'meeple':
+      case 'chess_piece':
+        return piece.dimensions || { x: 0.65, y: 1.1, z: 0.65 };
+      default:
+        return piece.dimensions || { x: 1.0, y: 0.3, z: 1.0 };
+    }
+  }
+
+  // Stacking compatibility logic
+  public canStackPieces(source?: TabletopPieceData | null, target?: TabletopPieceData | null): boolean {
+    if (!source || !target || source.id === target.id) return false;
+    if (source.isLocked || target.isLocked) return false;
+
+    // 1. Cards and Decks
+    const isSourceCard = source.type === 'card' || source.type === 'card_deck';
+    const isTargetCard = target.type === 'card' || target.type === 'card_deck';
+    if (isSourceCard && isTargetCard) {
+      return true;
+    }
+
+    // 2. Poker Chips
+    if (source.type === 'poker_chip' && target.type === 'poker_chip') {
+      return true;
+    }
+
+    // 3. Checkers
+    if (source.type === 'checker' && target.type === 'checker') {
+      return true;
+    }
+
+    // 4. Coins
+    if (source.type === 'coin' && target.type === 'coin') {
+      return true;
+    }
+
+    // 5. Dominos or Blocks
+    if (source.type === 'domino' && target.type === 'domino') {
+      return true;
+    }
+    if (source.type === 'block' && target.type === 'block') {
+      return true;
+    }
+
+    return false;
+  }
+
   public triggerPing(pos: Vector3D, colorHex: string = '#38bdf8') {
     const ringGeo = new THREE.RingGeometry(0.1, 0.25, 32);
     const ringMat = new THREE.MeshBasicMaterial({
@@ -1483,10 +1663,13 @@ export class TabletopRenderer {
           }
 
           this.grabbedPieceId = pieceId;
-          const pieceY = pieceHit.position.y + 0.6;
+          const pieceDims = this.getPieceDimensions(pieceData);
+          this.currentDraggedY = pieceHit.position.y + pieceDims.y / 2 + 0.3;
+          this.activeStackTargetId = null;
+          this.hideStackGuide();
           this.dragPlane.setFromNormalAndCoplanarPoint(
             new THREE.Vector3(0, 1, 0),
-            new THREE.Vector3(0, pieceY, 0)
+            new THREE.Vector3(0, this.currentTableConfig.height, 0)
           );
 
           this.lastDragPos.copy(pieceHit.position);
@@ -1645,11 +1828,94 @@ export class TabletopRenderer {
         if (this.raycaster.ray.intersectPlane(this.dragPlane, this.dragPlaneIntersect)) {
           const maxX = this.currentTableConfig.width / 2 + 1.5;
           const maxZ = this.currentTableConfig.length / 2 + 1.5;
-          const clampedX = Math.max(-maxX, Math.min(maxX, this.dragPlaneIntersect.x));
-          const clampedZ = Math.max(-maxZ, Math.min(maxZ, this.dragPlaneIntersect.z));
+          let clampedX = Math.max(-maxX, Math.min(maxX, this.dragPlaneIntersect.x));
+          let clampedZ = Math.max(-maxZ, Math.min(maxZ, this.dragPlaneIntersect.z));
 
-          const targetPos = new THREE.Vector3(clampedX, this.dragPlaneIntersect.y, clampedZ);
           const mesh = this.pieceMeshes.get(this.grabbedPieceId);
+          const draggedPiece = mesh ? ((mesh as any).pieceData as TabletopPieceData | undefined) : undefined;
+          const draggedDims = this.getPieceDimensions(draggedPiece);
+          const draggedHalfX = (draggedDims.x || 1.0) / 2;
+          const draggedHalfZ = (draggedDims.z || 1.0) / 2;
+          const draggedRadius = Math.hypot(draggedHalfX, draggedHalfZ);
+          const draggedHeight = draggedDims.y || 0.01;
+
+          const tableTopY = this.currentTableConfig.height;
+          // Normal hovering height when dragging over empty table:
+          const baseDragElevation = tableTopY + draggedHeight / 2 + 0.10;
+
+          let highestUnderlyingSurface = tableTopY;
+          let touchedAnyPiece = false;
+          let stackCandidate: { piece: TabletopPieceData; mesh: THREE.Group | THREE.Mesh; dist: number } | null = null;
+          let minStackDist = Infinity;
+
+          // Check all other pieces on the table for touch / overlap / stacking
+          for (const [otherId, otherMesh] of this.pieceMeshes.entries()) {
+            if (otherId === this.grabbedPieceId || this.multiDragOffsets.has(otherId)) continue;
+            const otherPiece = (otherMesh as any).pieceData as TabletopPieceData | undefined;
+            if (!otherPiece) continue;
+
+            const otherDims = this.getPieceDimensions(otherPiece);
+            const otherHalfX = (otherDims.x || 1.0) / 2;
+            const otherHalfZ = (otherDims.z || 1.0) / 2;
+            const otherRadius = Math.hypot(otherHalfX, otherHalfZ);
+            const otherHeight = otherDims.y || 0.01;
+
+            const dx = Math.abs(clampedX - otherMesh.position.x);
+            const dz = Math.abs(clampedZ - otherMesh.position.z);
+            const distXZ = Math.hypot(clampedX - otherMesh.position.x, clampedZ - otherMesh.position.z);
+
+            // Bounding touch detection:
+            // Two pieces touch when their footprints in the XZ plane meet or overlap:
+            const touchThresholdX = (draggedHalfX + otherHalfX) * 0.96;
+            const touchThresholdZ = (draggedHalfZ + otherHalfZ) * 0.96;
+            const isTouching = (dx <= touchThresholdX && dz <= touchThresholdZ) || (distXZ < (draggedRadius + otherRadius) * 0.90);
+
+            if (isTouching) {
+              touchedAnyPiece = true;
+              const otherTop = otherMesh.position.y + otherHeight / 2;
+              if (otherTop > highestUnderlyingSurface) {
+                highestUnderlyingSurface = otherTop;
+              }
+
+              // Check if stackable according to logic
+              if (this.canStackPieces(draggedPiece, otherPiece)) {
+                if (distXZ < minStackDist) {
+                  minStackDist = distXZ;
+                  stackCandidate = { piece: otherPiece, mesh: otherMesh, dist: distXZ };
+                }
+              }
+            }
+          }
+
+          // Raise the dragged component so that it can be stacked on top of the other!
+          let targetElevationY: number;
+          if (touchedAnyPiece && highestUnderlyingSurface > tableTopY) {
+            // When touching another component, raise it up so it hovers above the top of the underlying component:
+            targetElevationY = highestUnderlyingSurface + draggedHeight / 2 + 0.12;
+          } else {
+            targetElevationY = baseDragElevation;
+          }
+
+          // Magnetize and stack indicator when centered over a stackable candidate
+          if (stackCandidate && stackCandidate.dist < (draggedHalfX + this.getPieceDimensions(stackCandidate.piece).x / 2) * 0.7) {
+            // Magnetic centering assist
+            clampedX = THREE.MathUtils.lerp(clampedX, stackCandidate.mesh.position.x, 0.28);
+            clampedZ = THREE.MathUtils.lerp(clampedZ, stackCandidate.mesh.position.z, 0.28);
+            this.activeStackTargetId = stackCandidate.piece.id;
+            this.showStackGuide(stackCandidate.mesh.position, this.getPieceDimensions(stackCandidate.piece));
+          } else {
+            this.activeStackTargetId = null;
+            this.hideStackGuide();
+          }
+
+          // Smoothly interpolate Y elevation
+          if (this.currentDraggedY === null || this.currentDraggedY === undefined || Number.isNaN(this.currentDraggedY)) {
+            this.currentDraggedY = targetElevationY;
+          } else {
+            this.currentDraggedY = THREE.MathUtils.lerp(this.currentDraggedY, targetElevationY, 0.32);
+          }
+
+          const targetPos = new THREE.Vector3(clampedX, this.currentDraggedY, clampedZ);
           if (mesh) {
             mesh.position.copy(targetPos);
           }

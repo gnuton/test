@@ -60,6 +60,19 @@ export interface Vector3D {
   z: number;
 }
 
+/**
+ * Calculates realistic card deck height based on card count.
+ * 1 card: ~0.008 units (~0.4mm in physical scale)
+ * 2 cards: ~0.015 units (thin like 2 real cards, NOT a 100-card block!)
+ * 52 cards: ~0.265 units (~1.4cm standard poker deck)
+ * 100 cards: ~0.505 units
+ */
+export function calculateDeckHeight(cardCount: number): number {
+  if (cardCount <= 1) return 0.008;
+  if (cardCount === 2) return 0.015;
+  return Math.max(0.015, Math.min(0.65, 0.015 + (cardCount - 2) * 0.005));
+}
+
 export interface Quaternion4D {
   x: number;
   y: number;
