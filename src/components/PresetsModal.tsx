@@ -24,20 +24,36 @@ export const PresetsModal: React.FC<Props> = ({
 
   const presets = [
     {
+      id: 'blackjack',
+      name: 'Blackjack (21) Casino',
+      desc: 'Dealer shoe deck, dealer upcard/hole card, player betting circles, stackable chips, and interactive hit/stand game controls.',
+      icon: Sparkles,
+      color: 'from-emerald-600 to-green-700',
+      pieces: '52-Card Shoe Deck, Dealer Hand, Player Hand, $5-$100 Chips',
+    },
+    {
+      id: 'solitaire',
+      name: 'Klondike Solitaire',
+      desc: 'Full 7-column cascading tableau, 4 foundation piles, draw stock deck and waste pile for classic single-player cards.',
+      icon: Layers,
+      color: 'from-blue-600 to-cyan-700',
+      pieces: '7 Tableau Columns, 4 Foundation Spots, Stock Deck',
+    },
+    {
+      id: 'poker',
+      name: 'Texas Hold\'em Poker',
+      desc: 'Classic oval felt table, standard 52-card deck, community cards, dealer button, and 30 stackable $1-$500 chips.',
+      icon: Sparkles,
+      color: 'from-amber-500 to-orange-600',
+      pieces: '52-Card Deck, $1, $5, $25, $100, $500 Chips, Dealer Button',
+    },
+    {
       id: 'boardgame',
       name: 'Board Game Sandbox',
       desc: 'Versatile playground with colorful meeples, pawns, polyhedral dice, cards, and dominoes.',
       icon: Layers,
       color: 'from-emerald-500 to-teal-600',
       pieces: 'Meeples, Pawns, D6, D20, Deck, Cards, Dominoes',
-    },
-    {
-      id: 'poker',
-      name: 'Poker & Casino Night',
-      desc: 'Classic oval felt table, standard 52-card deck, community cards, dealer button, and 30 stackable $1-$500 chips.',
-      icon: Sparkles,
-      color: 'from-amber-500 to-orange-600',
-      pieces: '52-Card Deck, $1, $5, $25, $100, $500 Chips, Dealer Button',
     },
     {
       id: 'chess',

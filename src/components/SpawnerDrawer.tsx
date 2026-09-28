@@ -173,6 +173,8 @@ export const SpawnerDrawer: React.FC<Props> = ({
                 { type: 'dice_d8', label: 'D8 Octahedron', sides: 8 },
                 { type: 'dice_d10', label: 'D10 Trapezohedron', sides: 10 },
                 { type: 'dice_d12', label: 'D12 Dodecahedron', sides: 12 },
+                { type: 'dice_fate', label: 'FATE / Fudge Dice', sides: 6 },
+                { type: 'coin', label: 'Flippable Gold Coin', sides: 2 },
               ].map((d) => (
                 <button
                   key={d.type}
@@ -295,6 +297,8 @@ export const SpawnerDrawer: React.FC<Props> = ({
             <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Pawns, Meeples & Chess</h3>
             <div className="grid grid-cols-2 gap-2">
               {[
+                { type: 'counter', label: 'Score Counter (+/-)', labelText: '0' },
+                { type: 'tablet', label: '3D Web Tablet', labelText: 'TABLET' },
                 { type: 'meeple', label: 'Meeple' },
                 { type: 'pawn', label: 'Board Pawn' },
                 { type: 'chess_piece', label: 'Chess King', labelText: 'K' },

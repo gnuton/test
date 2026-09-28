@@ -1,6 +1,6 @@
 /**
  * Tabletop Nexus - Pluggable Client Library
- * Core SDK for embedding 3D Tabletop Simulator into web applications
+ * Complete Tabletop Simulator Client SDK
  */
 
 import {
@@ -10,7 +10,17 @@ import {
   TableConfig,
   PlayerPresence,
   ChatMessage,
-  Vector3D
+  DrawingStroke,
+  NotebookEntry,
+  Vector3D,
+  ToolMode,
+  HostPermissions,
+  TurnState,
+  ClockState,
+  SnapPoint,
+  JointData,
+  TextLabel,
+  DecalData
 } from '../types.js';
 import { TabletopRenderer } from './TabletopRenderer.js';
 import { TabletopAudio } from './TabletopAudio.js';
@@ -47,7 +57,45 @@ export class TabletopClient {
   public pieces = new Map<string, TabletopPieceData>();
   public players = new Map<string, PlayerPresence>();
   public chatMessages: ChatMessage[] = [];
+  public strokes: DrawingStroke[] = [];
+  public notebook: NotebookEntry[] = [];
   public currentTableConfig!: TableConfig;
+
+  // TTS KB Host & Feature States
+  public permissions: HostPermissions = {
+    tableFlip: true,
+    spawnObjects: true,
+    deleteObjects: true,
+    drawTools: true,
+    physicsInteract: true,
+    contextMenu: true,
+    changeSettings: true,
+  };
+  public turns: TurnState = {
+    enabled: false,
+    activePlayerId: '',
+    activePlayerName: '',
+    activePlayerColor: '',
+    round: 1,
+    timerSeconds: 60,
+    timerRunning: false,
+    timeRemaining: 60,
+    order: 'clockwise',
+    playerOrder: [],
+  };
+  public clock: ClockState = {
+    mode: 'stopwatch',
+    running: false,
+    seconds: 0,
+    initialSeconds: 0,
+  };
+  public snapPoints: SnapPoint[] = [];
+  public joints: JointData[] = [];
+  public textLabels: TextLabel[] = [];
+  public decals: DecalData[] = [];
+  public degreeSnap: number = 45;
+  public undoHistory: Array<{ pieces: TabletopPieceData[]; tableConfig: TableConfig }> = [];
+  public redoHistory: Array<{ pieces: TabletopPieceData[]; tableConfig: TableConfig }> = [];
 
   private listeners = new Map<string, Set<TabletopEventListener>>();
   private plugins = new Map<string, TabletopPlugin>();
@@ -60,7 +108,6 @@ export class TabletopClient {
     this.audio = new TabletopAudio();
     this.audio.enabled = options.soundEnabled !== false;
 
-    // Default table config before server init
     this.currentTableConfig = {
       shape: 'rectangular',
       width: 16,
@@ -70,26 +117,29 @@ export class TabletopClient {
       woodColor: '#3d2516',
       hasRim: true,
       gravity: 9.81,
+      environment: 'studio',
+      grid: {
+        enabled: false,
+        type: 'square',
+        size: 1.5,
+        snap: false,
+        color: '#38bdf8',
+        opacity: 0.3,
+      },
     };
 
-    // Initialize 3D renderer
     this.initRenderer();
-
-    // Connect to WebSocket server
     this.connect();
-
-    // Bind keyboard shortcuts
     this.bindKeyboardShortcuts();
   }
 
   private initRenderer() {
     this.renderer = new TabletopRenderer(this.options.container, this.currentTableConfig);
 
-    // Wire renderer callbacks to network messages
     this.renderer.events = {
       onPieceSelect: (pieceId) => {
         const piece = this.pieces.get(pieceId);
-        if (piece) {
+        if (piece && !piece.isLocked) {
           this.sendMessage({
             type: 'grab',
             pieceId,
@@ -125,12 +175,57 @@ export class TabletopClient {
               cursor: worldPos,
               isPointerActive,
             });
-          }, 45); // ~22Hz pointer broadcasts
+          }, 45);
         }
       },
 
       onTableClick: (worldPos) => {
         this.emit('table:click', worldPos);
+      },
+
+      onStrokeDrawn: (stroke) => {
+        this.strokes.push(stroke);
+        this.sendMessage({ type: 'draw_stroke', stroke });
+        this.emit('stroke:added', stroke);
+      },
+
+      onFlickRelease: (pieceId, impulse) => {
+        this.sendMessage({ type: 'flick_piece', pieceId, impulse });
+        this.audio.playFlick();
+      },
+
+      onCounterClick: (pieceId, delta) => {
+        this.sendMessage({ type: 'modify_counter', pieceId, delta });
+      },
+
+      onPieceInspect: (piece) => {
+        this.emit('piece:inspect', piece);
+      },
+
+      onSelectionChange: (selectedPieceIds) => {
+        this.emit('selection:changed', selectedPieceIds);
+      },
+
+      onBoxSelectChange: (box) => {
+        this.emit('selection:box', box);
+      },
+
+      onMultiPieceDrag: (updates) => {
+        this.sendMessage({
+          type: 'multi_move_grabbed',
+          updates: updates.map((u) => ({ pieceId: u.pieceId, targetPosition: u.worldPos })),
+        });
+      },
+
+      onMultiPieceRelease: (releases) => {
+        this.sendMessage({
+          type: 'multi_release_grabbed',
+          releases,
+        });
+      },
+
+      onContextMenu: (info) => {
+        this.emit('context_menu:open', info);
       },
     };
   }
@@ -141,7 +236,6 @@ export class TabletopClient {
       this.reconnectTimeout = null;
     }
 
-    // Determine WebSocket URL
     let wsUrl = this.options.wsUrl;
     if (!wsUrl) {
       const loc = window.location;
@@ -159,7 +253,6 @@ export class TabletopClient {
         this.connectionError = null;
         this.emit('connection:open', { roomId: this.roomId });
 
-        // Join room explicitly
         this.sendMessage({
           type: 'join',
           roomId: this.roomId,
@@ -180,7 +273,6 @@ export class TabletopClient {
       this.ws.onclose = () => {
         this.isConnected = false;
         this.emit('connection:close', {});
-        // Auto-reconnect after 2.5s
         this.reconnectTimeout = setTimeout(() => {
           this.connect();
         }, 2500);
@@ -201,9 +293,9 @@ export class TabletopClient {
         this.playerId = msg.playerId;
         this.roomId = msg.roomId;
         this.currentTableConfig = msg.tableConfig;
+        this.renderer.applyEnvironment(msg.tableConfig.environment || 'studio');
         this.renderer.rebuildTable(msg.tableConfig);
 
-        // Clear & populate pieces
         this.pieces.clear();
         this.renderer.clearAllPieces();
         for (const p of msg.pieces) {
@@ -211,12 +303,35 @@ export class TabletopClient {
           this.renderer.syncPiece(p);
         }
 
-        // Players & chat
         this.players.clear();
         for (const p of msg.players) {
           this.players.set(p.id, p);
         }
         this.chatMessages = msg.messages;
+        this.strokes = msg.strokes || [];
+        this.notebook = msg.notebook || [];
+
+        if (msg.permissions) this.permissions = msg.permissions;
+        if (msg.turns) this.turns = msg.turns;
+        if (msg.clock) this.clock = msg.clock;
+        if (msg.snapPoints) {
+          this.snapPoints = msg.snapPoints;
+          this.renderer.syncSnapPoints(this.snapPoints);
+        }
+        if (msg.joints) {
+          this.joints = msg.joints;
+          this.renderer.syncJoints(this.joints);
+        }
+        if (msg.textLabels) {
+          this.textLabels = msg.textLabels;
+          this.renderer.syncTextLabels(this.textLabels);
+        }
+        if (msg.decals) {
+          this.decals = msg.decals;
+          this.renderer.syncDecals(this.decals);
+        }
+
+        this.renderer.applyStrokes(this.strokes);
         this.renderer.syncPlayerCursors(Array.from(this.players.values()), this.playerId);
 
         this.emit('init', {
@@ -224,13 +339,20 @@ export class TabletopClient {
           roomId: this.roomId,
           pieces: msg.pieces,
           players: msg.players,
+          notebook: this.notebook,
+          permissions: this.permissions,
+          turns: this.turns,
+          clock: this.clock,
+          snapPoints: this.snapPoints,
+          joints: this.joints,
+          textLabels: this.textLabels,
+          decals: this.decals,
         });
         break;
       }
 
       case 'physics_tick': {
         this.renderer.applyPhysicsUpdates(msg.updates);
-        // Sync local pieces map
         for (const u of msg.updates) {
           const p = this.pieces.get(u.id);
           if (p) {
@@ -238,6 +360,7 @@ export class TabletopClient {
             p.rotation = { x: u.r[0], y: u.r[1], z: u.r[2], w: u.r[3] };
             p.isSleeping = u.s;
             p.grabbedBy = u.g;
+            if (u.l !== undefined) p.isLocked = u.l;
             if (u.val !== undefined) p.value = u.val;
           }
         }
@@ -277,6 +400,14 @@ export class TabletopClient {
         this.pieces.delete(msg.pieceId);
         this.renderer.removePiece(msg.pieceId);
         this.emit('piece:removed', msg.pieceId);
+        break;
+      }
+
+      case 'piece_locked_toggled': {
+        const piece = this.pieces.get(msg.pieceId);
+        if (piece) piece.isLocked = msg.isLocked;
+        this.audio.playLock();
+        this.emit('piece:locked', { pieceId: msg.pieceId, isLocked: msg.isLocked });
         break;
       }
 
@@ -332,7 +463,93 @@ export class TabletopClient {
           case 'ping':
             this.audio.playPing();
             break;
+          case 'flick':
+            this.audio.playFlick();
+            break;
+          case 'lock':
+            this.audio.playLock();
+            break;
+          case 'turn_chime':
+            this.audio.playTurnChime();
+            break;
+          case 'timer_tick':
+            this.audio.playTimerTick();
+            break;
+          case 'timer_alarm':
+            this.audio.playTimerAlarm();
+            break;
+          case 'joint_snap':
+            this.audio.playJointSnap();
+            break;
         }
+        break;
+      }
+
+      case 'permissions_updated': {
+        this.permissions = msg.permissions;
+        this.emit('permissions:updated', msg.permissions);
+        break;
+      }
+
+      case 'turns_updated': {
+        this.turns = msg.turns;
+        this.emit('turns:updated', msg.turns);
+        break;
+      }
+
+      case 'clock_updated': {
+        this.clock = msg.clock;
+        this.emit('clock:updated', msg.clock);
+        break;
+      }
+
+      case 'snap_points_updated': {
+        this.snapPoints = msg.snapPoints;
+        this.renderer.syncSnapPoints(msg.snapPoints);
+        this.emit('snap_points:updated', msg.snapPoints);
+        break;
+      }
+
+      case 'joints_updated': {
+        this.joints = msg.joints;
+        this.renderer.syncJoints(msg.joints);
+        this.emit('joints:updated', msg.joints);
+        break;
+      }
+
+      case 'text_labels_updated': {
+        this.textLabels = msg.textLabels;
+        this.renderer.syncTextLabels(msg.textLabels);
+        this.emit('text_labels:updated', msg.textLabels);
+        break;
+      }
+
+      case 'decals_updated': {
+        this.decals = msg.decals;
+        this.renderer.syncDecals(msg.decals);
+        this.emit('decals:updated', msg.decals);
+        break;
+      }
+
+      case 'stroke_added': {
+        this.strokes.push(msg.stroke);
+        this.renderer.applyStrokes(this.strokes);
+        this.emit('stroke:added', msg.stroke);
+        break;
+      }
+
+      case 'strokes_cleared': {
+        this.strokes = [];
+        this.renderer.clearPaint();
+        this.emit('strokes:cleared', {});
+        break;
+      }
+
+      case 'notebook_updated': {
+        const idx = this.notebook.findIndex((e) => e.id === msg.entry.id);
+        if (idx >= 0) this.notebook[idx] = msg.entry;
+        else this.notebook.push(msg.entry);
+        this.emit('notebook:updated', msg.entry);
         break;
       }
 
@@ -351,6 +568,7 @@ export class TabletopClient {
 
       case 'table_config_updated': {
         this.currentTableConfig = msg.config;
+        this.renderer.applyEnvironment(msg.config.environment || 'studio');
         this.renderer.rebuildTable(msg.config);
         this.emit('table:config', msg.config);
         break;
@@ -364,65 +582,205 @@ export class TabletopClient {
     }
   }
 
-  // Keyboard Shortcuts (TTS Standards: Q/E rotate, R roll, F flip, etc.)
+  // Keyboard Shortcuts (TTS Standards: F1-F7, L lock, G group, Q/E rotate, R roll, F flip, 1-9 draw)
   private bindKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
-      // Don't intercept if typing in an input / textarea
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
         return;
       }
 
-      const grabbedId = this.renderer.grabbedPieceId;
+      // F1 - F7 Tool Switching
+      if (e.key === 'F1') {
+        e.preventDefault();
+        this.setTool('grab');
+      } else if (e.key === 'F2') {
+        e.preventDefault();
+        this.setTool('paint');
+      } else if (e.key === 'F3') {
+        e.preventDefault();
+        this.setTool('ruler');
+      } else if (e.key === 'F4') {
+        e.preventDefault();
+        this.setTool('flick');
+      } else if (e.key === 'F5') {
+        e.preventDefault();
+        this.setTool('joint');
+      } else if (e.key === 'F6') {
+        e.preventDefault();
+        this.setTool('snap_points');
+      } else if (e.key === 'F7') {
+        e.preventDefault();
+        this.setTool('zones');
+      } else if (e.key === 'F8') {
+        e.preventDefault();
+        this.setTool('text');
+      } else if (e.key === 'F9') {
+        e.preventDefault();
+        this.setTool('gizmo');
+      } else if (e.key === 'F10') {
+        e.preventDefault();
+        this.setTool('decal');
+      }
 
-      if (grabbedId) {
+      // Ctrl+A Select All
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault();
+        this.renderer.selectAll();
+        return;
+      }
+
+      // Escape Deselect All
+      if (e.key === 'Escape') {
+        this.renderer.clearSelection();
+        return;
+      }
+
+      const hoveredId = this.renderer.hoveredPieceId;
+      const grabbedId = this.renderer.grabbedPieceId;
+      const targetId = grabbedId || hoveredId;
+      const selectedIds = Array.from(this.renderer.selectedPieceIds);
+
+      // TTS Undo (Ctrl+Z) & Redo (Ctrl+Y / Ctrl+Shift+Z)
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        if (e.shiftKey) {
+          this.redo();
+        } else {
+          this.undo();
+        }
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) {
+        e.preventDefault();
+        this.redo();
+        return;
+      }
+
+      // 'H' Key: Pick up card to Private Player Hand
+      if ((e.key === 'h' || e.key === 'H') && (targetId || selectedIds.length > 0)) {
+        const pickId = targetId || selectedIds[0];
+        const piece = this.pieces.get(pickId);
+        if (piece && (piece.type === 'card' || piece.type === 'card_deck')) {
+          this.emit('hand:pickup', piece);
+          return;
+        }
+      }
+
+      // TTS 'L' Key: Toggle Lock on hovered or grabbed or selected pieces
+      if (e.key === 'l' || e.key === 'L') {
+        if (selectedIds.length > 1) {
+          selectedIds.forEach((id) => this.toggleLock(id));
+        } else if (targetId) {
+          this.toggleLock(targetId);
+        }
+        return;
+      }
+
+      // TTS 'G' Key: Group / Stack selected pieces into a deck or column
+      if (e.key === 'g' || e.key === 'G') {
+        this.saveHistorySnapshot();
+        if (selectedIds.length > 1) {
+          this.groupPieces(selectedIds);
+          this.renderer.clearSelection();
+          return;
+        } else if (hoveredId) {
+          const piece = this.pieces.get(hoveredId);
+          if (piece?.type === 'card' || piece?.type === 'poker_chip') {
+            const matchingIds = Array.from(this.pieces.values())
+              .filter((p) => p.type === piece.type)
+              .map((p) => p.id);
+            this.groupPieces(matchingIds);
+            return;
+          }
+        }
+      }
+
+      // Number keys 1-9 to deal N cards
+      if (/^[1-9]$/.test(e.key) && hoveredId) {
+        const piece = this.pieces.get(hoveredId);
+        if (piece?.type === 'card_deck') {
+          this.dealCards(parseInt(e.key, 10));
+        }
+      }
+
+      if (grabbedId || selectedIds.length > 0) {
+        const activeIds = grabbedId ? [grabbedId] : selectedIds;
+        const rad = (this.degreeSnap * Math.PI) / 180;
+
         if (e.key === 'q' || e.key === 'Q') {
-          // Rotate counterclockwise around Y
-          this.sendMessage({
-            type: 'rotate_grabbed',
-            pieceId: grabbedId,
-            deltaEuler: { x: 0, y: Math.PI / 8, z: 0 },
+          activeIds.forEach((id) => {
+            this.sendMessage({
+              type: 'rotate_grabbed',
+              pieceId: id,
+              deltaEuler: { x: 0, y: rad, z: 0 },
+            });
           });
         } else if (e.key === 'e' || e.key === 'E') {
-          // Rotate clockwise around Y
-          this.sendMessage({
-            type: 'rotate_grabbed',
-            pieceId: grabbedId,
-            deltaEuler: { x: 0, y: -Math.PI / 8, z: 0 },
+          activeIds.forEach((id) => {
+            this.sendMessage({
+              type: 'rotate_grabbed',
+              pieceId: id,
+              deltaEuler: { x: 0, y: -rad, z: 0 },
+            });
           });
         } else if (e.key === 'f' || e.key === 'F') {
-          // Flip upside down
-          this.sendMessage({
-            type: 'flip_grabbed',
-            pieceId: grabbedId,
+          activeIds.forEach((id) => {
+            this.sendMessage({
+              type: 'flip_grabbed',
+              pieceId: id,
+            });
           });
         } else if (e.key === 'r' || e.key === 'R') {
-          // Roll held dice
-          this.sendMessage({
-            type: 'roll_dice',
-            pieceId: grabbedId,
+          activeIds.forEach((id) => {
+            this.sendMessage({
+              type: 'roll_dice',
+              pieceId: id,
+            });
           });
         } else if (e.key === 'Delete' || e.key === 'Backspace') {
-          this.removePiece(grabbedId);
+          activeIds.forEach((id) => {
+            this.removePiece(id);
+          });
+          this.renderer.clearSelection();
         }
       } else {
         if (e.key === 'r' || e.key === 'R') {
-          // Roll all dice on table
-          this.rollAllDice();
+          if (hoveredId && this.pieces.get(hoveredId)?.type.startsWith('dice_')) {
+            this.rollDice(hoveredId);
+          } else {
+            this.rollAllDice();
+          }
         } else if (e.key === 'p' || e.key === 'P') {
-          // Ping table location
-          const hit = (this.renderer as any).raycastTable();
+          const hit = this.renderer.raycastTable();
           if (hit) {
             this.ping({ x: hit.x, y: hit.y, z: hit.z });
           }
         } else if (e.key === 'Tab') {
           e.preventDefault();
-          this.toggleRuler();
+          this.setTool(this.renderer.currentTool === 'ruler' ? 'grab' : 'ruler');
         }
       }
     });
   }
 
-  // Pluggable Action API
+  // Tool Selection
+  public setTool(tool: ToolMode) {
+    this.renderer.currentTool = tool;
+    if (tool !== 'ruler') {
+      this.renderer.clearRuler();
+    }
+    this.emit('tool:changed', tool);
+  }
+
+  // Actions
+  public toggleLock(pieceId: string) {
+    this.sendMessage({ type: 'toggle_lock', pieceId });
+  }
+
+  public groupPieces(pieceIds: string[]) {
+    this.sendMessage({ type: 'group_pieces', pieceIds });
+  }
+
   public rollDice(pieceId: string) {
     this.sendMessage({ type: 'roll_dice', pieceId });
   }
@@ -431,15 +789,73 @@ export class TabletopClient {
     this.sendMessage({ type: 'roll_all_dice' });
   }
 
+  public setDegreeSnap(deg: number) {
+    this.degreeSnap = deg;
+    this.emit('degree_snap:changed', deg);
+  }
+
+  public saveHistorySnapshot() {
+    if (this.pieces.size === 0) return;
+    const snapshot = {
+      pieces: Array.from(this.pieces.values()).map((p) => ({
+        ...p,
+        position: { ...p.position },
+        rotation: { ...p.rotation },
+      })),
+      tableConfig: { ...this.currentTableConfig },
+    };
+    this.undoHistory.push(snapshot);
+    if (this.undoHistory.length > 30) this.undoHistory.shift();
+    this.redoHistory = [];
+    this.emit('history:changed', { canUndo: this.undoHistory.length > 0, canRedo: this.redoHistory.length > 0 });
+  }
+
+  public undo() {
+    if (this.undoHistory.length === 0) return;
+    const currentSnapshot = {
+      pieces: Array.from(this.pieces.values()).map((p) => ({
+        ...p,
+        position: { ...p.position },
+        rotation: { ...p.rotation },
+      })),
+      tableConfig: { ...this.currentTableConfig },
+    };
+    this.redoHistory.push(currentSnapshot);
+    const target = this.undoHistory.pop()!;
+    this.loadSavedState(target);
+    this.audio.playCardShuffle();
+    this.emit('history:changed', { canUndo: this.undoHistory.length > 0, canRedo: this.redoHistory.length > 0 });
+  }
+
+  public redo() {
+    if (this.redoHistory.length === 0) return;
+    const currentSnapshot = {
+      pieces: Array.from(this.pieces.values()).map((p) => ({
+        ...p,
+        position: { ...p.position },
+        rotation: { ...p.rotation },
+      })),
+      tableConfig: { ...this.currentTableConfig },
+    };
+    this.undoHistory.push(currentSnapshot);
+    const target = this.redoHistory.pop()!;
+    this.loadSavedState(target);
+    this.audio.playCardShuffle();
+    this.emit('history:changed', { canUndo: this.undoHistory.length > 0, canRedo: this.redoHistory.length > 0 });
+  }
+
   public flipTable(force?: number) {
+    this.saveHistorySnapshot();
     this.sendMessage({ type: 'flip_table', force });
   }
 
   public resetTable() {
+    this.saveHistorySnapshot();
     this.sendMessage({ type: 'reset_table' });
   }
 
   public loadPreset(presetName: string) {
+    this.saveHistorySnapshot();
     this.sendMessage({ type: 'load_preset', presetName });
   }
 
@@ -467,6 +883,18 @@ export class TabletopClient {
     this.sendMessage({ type: 'deal_cards', count });
   }
 
+  public clearDrawings() {
+    this.sendMessage({ type: 'clear_strokes' });
+  }
+
+  public updateNotebook(entry: NotebookEntry) {
+    this.sendMessage({ type: 'update_notebook', entry });
+  }
+
+  public loadSavedState(state: { pieces: TabletopPieceData[]; tableConfig: TableConfig; notebook?: NotebookEntry[] }) {
+    this.sendMessage({ type: 'load_saved_state', state });
+  }
+
   public ping(position: Vector3D) {
     this.sendMessage({ type: 'ping', position });
   }
@@ -489,27 +917,101 @@ export class TabletopClient {
     });
   }
 
-  public toggleRuler() {
-    this.renderer.isRulerMode = !this.renderer.isRulerMode;
-    if (!this.renderer.isRulerMode) {
-      this.renderer.clearRuler();
-    }
-    this.emit('ruler:toggled', { active: this.renderer.isRulerMode });
-    return this.renderer.isRulerMode;
+  // TTS Turns & Host Administration Methods
+  public passTurn() {
+    this.sendMessage({ type: 'pass_turn' });
+  }
+
+  public toggleTurns(enabled: boolean) {
+    this.sendMessage({ type: 'toggle_turns', enabled });
+  }
+
+  public setTurnTimer(seconds: number) {
+    this.sendMessage({ type: 'set_turn_timer', seconds });
+  }
+
+  public updatePermissions(permissions: Partial<HostPermissions>) {
+    this.sendMessage({ type: 'update_permissions', permissions });
+  }
+
+  public promotePlayer(targetPlayerId: string) {
+    this.sendMessage({ type: 'promote_player', targetPlayerId });
+  }
+
+  public kickPlayer(targetPlayerId: string) {
+    this.sendMessage({ type: 'kick_player', targetPlayerId });
+  }
+
+  public toggleBlindfold(targetPlayerId?: string) {
+    this.sendMessage({ type: 'toggle_blindfold', targetPlayerId });
+  }
+
+  public clockAction(
+    action: 'start' | 'pause' | 'reset' | 'set_mode',
+    mode?: 'stopwatch' | 'countdown',
+    seconds?: number
+  ) {
+    this.sendMessage({ type: 'clock_action', action, mode, seconds });
+  }
+
+  // TTS Snap Points, Joints, Labels, and Decals
+  public addSnapPoint(snapPoint: SnapPoint) {
+    this.sendMessage({ type: 'add_snap_point', snapPoint });
+  }
+
+  public removeSnapPoint(snapPointId: string) {
+    this.sendMessage({ type: 'remove_snap_point', snapPointId });
+  }
+
+  public addJoint(joint: JointData) {
+    this.sendMessage({ type: 'add_joint', joint });
+  }
+
+  public removeJoint(jointId: string) {
+    this.sendMessage({ type: 'remove_joint', jointId });
+  }
+
+  public addTextLabel(textLabel: TextLabel) {
+    this.sendMessage({ type: 'add_text_label', textLabel });
+  }
+
+  public removeTextLabel(textLabelId: string) {
+    this.sendMessage({ type: 'remove_text_label', textLabelId });
+  }
+
+  public addDecal(decal: DecalData) {
+    this.sendMessage({ type: 'add_decal', decal });
+  }
+
+  public removeDecal(decalId: string) {
+    this.sendMessage({ type: 'remove_decal', decalId });
+  }
+
+  // TTS Deck Sifting, Cutting, Spreading, and Coin Flipping
+  public cutDeck(pieceId: string) {
+    this.sendMessage({ type: 'cut_deck', pieceId });
+  }
+
+  public spreadDeck(pieceId: string) {
+    this.sendMessage({ type: 'spread_deck', pieceId });
+  }
+
+  public takeCardFromDeck(deckId: string, cardName: string) {
+    this.sendMessage({ type: 'take_card_from_deck', deckId, cardName });
+  }
+
+  public flipCoin(pieceId: string) {
+    this.sendMessage({ type: 'flip_coin', pieceId });
   }
 
   // Plugin System
   public use(plugin: TabletopPlugin) {
-    if (this.plugins.has(plugin.name)) {
-      console.warn(`Plugin ${plugin.name} is already registered.`);
-      return;
-    }
+    if (this.plugins.has(plugin.name)) return;
     this.plugins.set(plugin.name, plugin);
     plugin.init(this);
     return this;
   }
 
-  // Event System
   public on(event: string, callback: TabletopEventListener) {
     if (!this.listeners.has(event)) {
       this.listeners.set(event, new Set());
@@ -520,9 +1022,7 @@ export class TabletopClient {
 
   public off(event: string, callback: TabletopEventListener) {
     const set = this.listeners.get(event);
-    if (set) {
-      set.delete(callback);
-    }
+    if (set) set.delete(callback);
   }
 
   public emit(event: string, data: any) {
@@ -548,11 +1048,7 @@ export class TabletopClient {
     this.plugins.clear();
     this.listeners.clear();
 
-    if (this.ws) {
-      this.ws.close();
-    }
-    if (this.renderer) {
-      this.renderer.destroy();
-    }
+    if (this.ws) this.ws.close();
+    if (this.renderer) this.renderer.destroy();
   }
 }

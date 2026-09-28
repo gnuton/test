@@ -1,6 +1,6 @@
 /**
  * Tabletop Nexus - 3D Renderer & Scene Manager
- * Built with Three.js for interactive browser simulation
+ * Full Tabletop Simulator Features
  */
 
 import * as THREE from 'three';
@@ -9,18 +9,34 @@ import {
   CompactPieceUpdate,
   TableConfig,
   Vector3D,
-  Quaternion4D,
-  PlayerPresence
+  PlayerPresence,
+  ToolMode,
+  DrawingStroke,
+  EnvironmentTheme,
+  SnapPoint,
+  JointData,
+  TextLabel,
+  DecalData,
+  CameraBookmark
 } from '../types.js';
 
 export interface RendererEvents {
   onPointerMove?: (worldPos: Vector3D, isPointerActive: boolean) => void;
   onPieceHover?: (pieceId: string | null) => void;
   onPieceSelect?: (pieceId: string) => void;
+  onSelectionChange?: (selectedPieceIds: string[]) => void;
+  onBoxSelectChange?: (box: { x1: number; y1: number; x2: number; y2: number; active: boolean }) => void;
   onPieceDrag?: (pieceId: string, worldPos: Vector3D) => void;
+  onMultiPieceDrag?: (updates: Array<{ pieceId: string; worldPos: Vector3D }>) => void;
   onPieceRelease?: (pieceId: string, velocity: Vector3D) => void;
+  onMultiPieceRelease?: (releases: Array<{ pieceId: string; velocity: Vector3D }>) => void;
+  onContextMenu?: (info: { pieceId?: string; pieceData?: TabletopPieceData; screenX: number; screenY: number }) => void;
   onTableClick?: (worldPos: Vector3D) => void;
   onRulerMeasure?: (distanceInches: number, start: Vector3D, end: Vector3D) => void;
+  onFlickRelease?: (pieceId: string, impulse: Vector3D) => void;
+  onStrokeDrawn?: (stroke: DrawingStroke) => void;
+  onCounterClick?: (pieceId: string, delta: number) => void;
+  onPieceInspect?: (piece: TabletopPieceData | null) => void;
 }
 
 export class TabletopRenderer {
@@ -29,18 +45,51 @@ export class TabletopRenderer {
   public camera: THREE.PerspectiveCamera;
   public renderer: THREE.WebGLRenderer;
 
-  // Meshes & Tracking
   public pieceMeshes = new Map<string, THREE.Group | THREE.Mesh>();
   public pieceTargetTransforms = new Map<
     string,
-    { pos: THREE.Vector3; quat: THREE.Quaternion; value?: number }
+    { pos: THREE.Vector3; quat: THREE.Quaternion; value?: number; isLocked?: boolean }
   >();
   public playerCursorMeshes = new Map<string, THREE.Group>();
 
-  // Table objects
+  // Selection & Multi-Selection
+  public selectedPieceIds = new Set<string>();
+  public isBoxSelecting = false;
+  public boxSelectStart = { x: 0, y: 0 };
+  public boxSelectCurrent = { x: 0, y: 0 };
+  public selectionHighlightGroup = new THREE.Group();
+  private selectionHighlightMeshes = new Map<string, THREE.Mesh>();
+  private multiDragOffsets = new Map<string, THREE.Vector3>();
+
+  // Right-click context click detection
+  private rightClickStartPos: { x: number; y: number } | null = null;
+  private rightClickStartTime = 0;
+
+  // Snap Points, Joints, Text Labels & Decals
+  public snapPointMeshes = new Map<string, THREE.Group>();
+  public textLabelMeshes = new Map<string, THREE.Sprite>();
+  public decalMeshes = new Map<string, THREE.Mesh>();
+  public jointLinesGroup = new THREE.Group();
+
+  // Camera Bookmarks & Hotkeys
+  public cameraBookmarks: CameraBookmark[] = [];
+  public rotationSnapAngle: number = 45;
+
+  // Table & Environment
   private tableGroup = new THREE.Group();
   private tableMesh: THREE.Mesh | null = null;
   private rimMeshes: THREE.Mesh[] = [];
+  private gridMesh: THREE.LineSegments | null = null;
+  private environmentGroup = new THREE.Group();
+
+  // Vector Paint Canvas Texture on Felt
+  private paintCanvas: HTMLCanvasElement;
+  private paintCtx: CanvasRenderingContext2D;
+  private paintTexture: THREE.CanvasTexture;
+  private currentDrawingPoints: [number, number][] = [];
+  public paintColor: string = '#ef4444';
+  public paintBrushSize: number = 4;
+  public isErasing: boolean = false;
 
   // Interaction & Raycasting
   public raycaster = new THREE.Raycaster();
@@ -53,7 +102,13 @@ export class TabletopRenderer {
   private lastDragTime = 0;
   private dragVelocity = new THREE.Vector3();
 
-  // Camera Orbit & Pan State
+  // Tool Modes & Flick State
+  public currentTool: ToolMode = 'grab';
+  private flickStartPos: THREE.Vector3 | null = null;
+  private flickTargetPieceId: string | null = null;
+  private flickArrowMesh: THREE.ArrowHelper | null = null;
+
+  // Camera State
   public isOrbiting = false;
   public isPanning = false;
   private prevPointerX = 0;
@@ -61,19 +116,22 @@ export class TabletopRenderer {
   public cameraSpherical = { radius: 24, theta: Math.PI / 4, phi: Math.PI / 3.2 };
   public cameraTarget = new THREE.Vector3(0, 2, 0);
 
-  // Ruler / Measurement Tool
-  public isRulerMode = false;
+  // Ruler Tool
   public rulerStart: THREE.Vector3 | null = null;
   public rulerEnd: THREE.Vector3 | null = null;
   private rulerLine: THREE.Line | null = null;
   private rulerLabelMesh: THREE.Sprite | null = null;
 
+  // Hand Zones
+  private handZoneMeshes: THREE.Mesh[] = [];
+
   // Pings
   private activePings: Array<{ mesh: THREE.Mesh; createdAt: number; maxRadius: number }> = [];
 
-  // Callbacks
+  // Events & Config
   public events: RendererEvents = {};
   public currentTableConfig: TableConfig;
+  public isAltPressed: boolean = false;
 
   private animationFrameId: number | null = null;
   private isDestroyed = false;
@@ -84,8 +142,7 @@ export class TabletopRenderer {
 
     // 1. Scene
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x0f172a); // Slate-900 ambient room
-    this.scene.fog = new THREE.FogExp2(0x0f172a, 0.015);
+    this.scene.add(this.environmentGroup);
 
     // 2. Camera
     const aspect = container.clientWidth / Math.max(1, container.clientHeight);
@@ -93,40 +150,47 @@ export class TabletopRenderer {
     this.updateCameraTransform();
 
     // 3. WebGL Renderer
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.1;
+    this.renderer.toneMappingExposure = 1.15;
     container.appendChild(this.renderer.domElement);
 
-    // 4. Lights & Environment
+    // 4. Vector Paint Texture
+    this.paintCanvas = document.createElement('canvas');
+    this.paintCanvas.width = 2048;
+    this.paintCanvas.height = 2048;
+    this.paintCtx = this.paintCanvas.getContext('2d')!;
+    this.paintCtx.lineCap = 'round';
+    this.paintCtx.lineJoin = 'round';
+    this.paintTexture = new THREE.CanvasTexture(this.paintCanvas);
+
+    // 5. Lights & Environment
     this.setupLighting();
+    this.applyEnvironment(this.currentTableConfig.environment || 'studio');
 
-    // 5. Build Table & Room Floor
+    // 6. Table & Visuals
     this.scene.add(this.tableGroup);
+    this.scene.add(this.selectionHighlightGroup);
     this.rebuildTable(this.currentTableConfig);
-    this.setupRoomFloor();
-
-    // 6. Setup Ruler Objects
     this.setupRulerVisuals();
+    this.setupFlickArrow();
 
-    // 7. Event Listeners
+    // 7. Bind Events
     this.bindEvents();
 
-    // 8. Start Render Loop
+    // 8. Render Loop
     this.renderLoop = this.renderLoop.bind(this);
     this.renderLoop();
   }
 
   private setupLighting() {
-    // Soft ambient light
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
     this.scene.add(ambientLight);
 
-    // Main Overhead Softbox Light (Casts crisp shadows on felt)
     const overheadLight = new THREE.DirectionalLight(0xfff7ed, 1.4);
     overheadLight.position.set(5, 20, 8);
     overheadLight.castShadow = true;
@@ -134,44 +198,116 @@ export class TabletopRenderer {
     overheadLight.shadow.mapSize.height = 2048;
     overheadLight.shadow.camera.near = 5;
     overheadLight.shadow.camera.far = 40;
-    overheadLight.shadow.camera.left = -15;
-    overheadLight.shadow.camera.right = 15;
-    overheadLight.shadow.camera.top = 15;
-    overheadLight.shadow.camera.bottom = -15;
+    overheadLight.shadow.camera.left = -16;
+    overheadLight.shadow.camera.right = 16;
+    overheadLight.shadow.camera.top = 16;
+    overheadLight.shadow.camera.bottom = -16;
     overheadLight.shadow.bias = -0.0005;
     overheadLight.shadow.radius = 2.5;
     this.scene.add(overheadLight);
 
-    // Secondary fill light
     const fillLight = new THREE.DirectionalLight(0x93c5fd, 0.45);
     fillLight.position.set(-10, 12, -10);
     this.scene.add(fillLight);
   }
 
-  private setupRoomFloor() {
-    // Subtle wooden parquet or dark tiled floor below table
-    const floorGeo = new THREE.PlaneGeometry(80, 80);
-    const floorMat = new THREE.MeshStandardMaterial({
-      color: 0x0a0f1d,
-      roughness: 0.85,
-      metalness: 0.1,
-    });
-    const floor = new THREE.Mesh(floorGeo, floorMat);
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = -2;
-    floor.receiveShadow = true;
-    this.scene.add(floor);
+  public applyEnvironment(env: EnvironmentTheme) {
+    this.currentTableConfig.environment = env;
 
-    // Subtle grid helper on floor
-    const grid = new THREE.GridHelper(60, 30, 0x1e293b, 0x111827);
-    grid.position.y = -1.98;
-    this.scene.add(grid);
+    while (this.environmentGroup.children.length > 0) {
+      const child = this.environmentGroup.children[0];
+      this.environmentGroup.remove(child);
+      if ((child as any).geometry) (child as any).geometry.dispose();
+    }
+
+    switch (env) {
+      case 'tavern': {
+        this.scene.background = new THREE.Color(0x181008);
+        this.scene.fog = new THREE.FogExp2(0x181008, 0.02);
+
+        // Warm tavern wooden floor & timber pillars
+        const floorGeo = new THREE.PlaneGeometry(80, 80);
+        const floorMat = new THREE.MeshStandardMaterial({ color: 0x1f140e, roughness: 0.9 });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.y = -2;
+        floor.receiveShadow = true;
+        this.environmentGroup.add(floor);
+        break;
+      }
+
+      case 'space': {
+        this.scene.background = new THREE.Color(0x030712);
+        this.scene.fog = new THREE.FogExp2(0x030712, 0.012);
+
+        // Starfield particles
+        const starCount = 600;
+        const starGeo = new THREE.BufferGeometry();
+        const starPositions = new Float32Array(starCount * 3);
+        for (let i = 0; i < starCount * 3; i += 3) {
+          starPositions[i] = (Math.random() - 0.5) * 120;
+          starPositions[i + 1] = Math.random() * 50 - 5;
+          starPositions[i + 2] = (Math.random() - 0.5) * 120;
+        }
+        starGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+        const starMat = new THREE.PointsMaterial({ color: 0x38bdf8, size: 0.8, transparent: true, opacity: 0.8 });
+        const stars = new THREE.Points(starGeo, starMat);
+        this.environmentGroup.add(stars);
+        break;
+      }
+
+      case 'penthouse': {
+        this.scene.background = new THREE.Color(0x090d16);
+        this.scene.fog = new THREE.FogExp2(0x090d16, 0.015);
+
+        const floorGeo = new THREE.PlaneGeometry(80, 80);
+        const floorMat = new THREE.MeshStandardMaterial({ color: 0x050810, roughness: 0.4, metalness: 0.6 });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.y = -2;
+        floor.receiveShadow = true;
+        this.environmentGroup.add(floor);
+        break;
+      }
+
+      case 'forest': {
+        this.scene.background = new THREE.Color(0x061e12);
+        this.scene.fog = new THREE.FogExp2(0x061e12, 0.02);
+
+        const floorGeo = new THREE.PlaneGeometry(80, 80);
+        const floorMat = new THREE.MeshStandardMaterial({ color: 0x0a2416, roughness: 0.95 });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.y = -2;
+        floor.receiveShadow = true;
+        this.environmentGroup.add(floor);
+        break;
+      }
+
+      case 'studio':
+      default: {
+        this.scene.background = new THREE.Color(0x0f172a);
+        this.scene.fog = new THREE.FogExp2(0x0f172a, 0.015);
+
+        const floorGeo = new THREE.PlaneGeometry(80, 80);
+        const floorMat = new THREE.MeshStandardMaterial({ color: 0x0a0f1d, roughness: 0.85 });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.y = -2;
+        floor.receiveShadow = true;
+        this.environmentGroup.add(floor);
+
+        const grid = new THREE.GridHelper(60, 30, 0x1e293b, 0x111827);
+        grid.position.y = -1.98;
+        this.environmentGroup.add(grid);
+        break;
+      }
+    }
   }
 
   public rebuildTable(config: TableConfig) {
     this.currentTableConfig = config;
 
-    // Clear previous table geometry
     while (this.tableGroup.children.length > 0) {
       const child = this.tableGroup.children[0];
       this.tableGroup.remove(child);
@@ -183,14 +319,13 @@ export class TabletopRenderer {
     const tableThickness = 0.5;
     const tableY = height - tableThickness / 2;
 
-    // Felt Surface Material
     const feltMat = new THREE.MeshStandardMaterial({
       color: new THREE.Color(feltColor),
       roughness: 0.75,
       metalness: 0.05,
+      map: this.paintTexture, // Overlay Vector Paint drawing strokes
     });
 
-    // Wood Border Material
     const woodMat = new THREE.MeshStandardMaterial({
       color: new THREE.Color(woodColor),
       roughness: 0.35,
@@ -198,7 +333,6 @@ export class TabletopRenderer {
     });
 
     if (shape === 'oval') {
-      // Cylinder for oval / circular
       const tableGeo = new THREE.CylinderGeometry(width / 2, width / 2, tableThickness, 48);
       tableGeo.scale(1, 1, length / width);
       this.tableMesh = new THREE.Mesh(tableGeo, feltMat);
@@ -216,54 +350,42 @@ export class TabletopRenderer {
         this.tableGroup.add(rimMesh);
       }
     } else {
-      // Rectangular Table
       const tableGeo = new THREE.BoxGeometry(width, tableThickness, length);
       this.tableMesh = new THREE.Mesh(tableGeo, feltMat);
       this.tableMesh.position.set(0, tableY, 0);
       this.tableMesh.receiveShadow = true;
       this.tableGroup.add(this.tableMesh);
 
-      // Wooden Rims
       if (hasRim) {
         const rimH = 0.45;
         const rimT = 0.35;
         const rimY = height + rimH / 2 - 0.05;
 
-        // North & South rims
         const rimNSGeo = new THREE.BoxGeometry(width + rimT * 2, rimH, rimT);
         const northRim = new THREE.Mesh(rimNSGeo, woodMat);
         northRim.position.set(0, rimY, length / 2 + rimT / 2);
         northRim.castShadow = true;
-        northRim.receiveShadow = true;
         this.tableGroup.add(northRim);
-        this.rimMeshes.push(northRim);
 
         const southRim = new THREE.Mesh(rimNSGeo, woodMat);
         southRim.position.set(0, rimY, -length / 2 - rimT / 2);
         southRim.castShadow = true;
-        southRim.receiveShadow = true;
         this.tableGroup.add(southRim);
-        this.rimMeshes.push(southRim);
 
-        // East & West rims
         const rimEWGeo = new THREE.BoxGeometry(rimT, rimH, length);
         const eastRim = new THREE.Mesh(rimEWGeo, woodMat);
         eastRim.position.set(width / 2 + rimT / 2, rimY, 0);
         eastRim.castShadow = true;
-        eastRim.receiveShadow = true;
         this.tableGroup.add(eastRim);
-        this.rimMeshes.push(eastRim);
 
         const westRim = new THREE.Mesh(rimEWGeo, woodMat);
         westRim.position.set(-width / 2 - rimT / 2, rimY, 0);
         westRim.castShadow = true;
-        westRim.receiveShadow = true;
         this.tableGroup.add(westRim);
-        this.rimMeshes.push(westRim);
       }
     }
 
-    // Table Legs
+    // Legs
     const legGeo = new THREE.CylinderGeometry(0.35, 0.25, height, 16);
     const legOffsetW = width / 2 - 1.2;
     const legOffsetL = length / 2 - 1.2;
@@ -273,13 +395,143 @@ export class TabletopRenderer {
       [legOffsetW, -legOffsetL],
       [-legOffsetW, -legOffsetL],
     ];
-
     for (const [lx, lz] of legPositions) {
       const leg = new THREE.Mesh(legGeo, woodMat);
       leg.position.set(lx, height / 2, lz);
       leg.castShadow = true;
       this.tableGroup.add(leg);
     }
+
+    // Grid Overlay
+    this.updateGridVisuals();
+
+    // Hand Zones
+    this.rebuildHandZones();
+  }
+
+  // TTS Grid Overlay on Table Surface
+  public updateGridVisuals() {
+    if (this.gridMesh) {
+      this.tableGroup.remove(this.gridMesh);
+      this.gridMesh.geometry.dispose();
+      (this.gridMesh.material as THREE.Material).dispose();
+      this.gridMesh = null;
+    }
+
+    if (!this.currentTableConfig.grid?.enabled) return;
+
+    const { width, length, height, grid } = this.currentTableConfig;
+    const size = grid.size || 1.5;
+    const halfW = width / 2 - 0.2;
+    const halfL = length / 2 - 0.2;
+    const y = height + 0.01;
+
+    const linePoints: THREE.Vector3[] = [];
+
+    // X lines
+    for (let x = -halfW; x <= halfW; x += size) {
+      linePoints.push(new THREE.Vector3(x, y, -halfL));
+      linePoints.push(new THREE.Vector3(x, y, halfL));
+    }
+    // Z lines
+    for (let z = -halfL; z <= halfL; z += size) {
+      linePoints.push(new THREE.Vector3(-halfW, y, z));
+      linePoints.push(new THREE.Vector3(halfW, y, z));
+    }
+
+    const geo = new THREE.BufferGeometry().setFromPoints(linePoints);
+    const mat = new THREE.LineBasicMaterial({
+      color: new THREE.Color(grid.color || '#38bdf8'),
+      transparent: true,
+      opacity: grid.opacity || 0.35,
+      depthWrite: false,
+    });
+    this.gridMesh = new THREE.LineSegments(geo, mat);
+    this.tableGroup.add(this.gridMesh);
+  }
+
+  // TTS Hand Zones around table
+  private rebuildHandZones() {
+    for (const zone of this.handZoneMeshes) {
+      this.tableGroup.remove(zone);
+      zone.geometry.dispose();
+      (zone.material as THREE.Material).dispose();
+    }
+    this.handZoneMeshes = [];
+
+    const { width, length, height } = this.currentTableConfig;
+    const zoneConfigs = [
+      { name: 'Seat 1 (South)', color: '#ef4444', x: 0, z: length / 2 - 1.2, w: 8, d: 2 },
+      { name: 'Seat 2 (North)', color: '#3b82f6', x: 0, z: -length / 2 + 1.2, w: 8, d: 2 },
+      { name: 'Seat 3 (West)', color: '#10b981', x: -width / 2 + 1.2, z: 0, w: 2, d: 8 },
+      { name: 'Seat 4 (East)', color: '#f59e0b', x: width / 2 - 1.2, z: 0, w: 2, d: 8 },
+    ];
+
+    for (const z of zoneConfigs) {
+      const geo = new THREE.PlaneGeometry(z.w, z.d);
+      const mat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(z.color),
+        transparent: true,
+        opacity: 0.12,
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.set(z.x, height + 0.015, z.z);
+      this.tableGroup.add(mesh);
+      this.handZoneMeshes.push(mesh);
+    }
+  }
+
+  // TTS Vector Paint: Ingest Server Strokes
+  public applyStrokes(strokes: DrawingStroke[]) {
+    const { width, length } = this.currentTableConfig;
+    this.paintCtx.clearRect(0, 0, this.paintCanvas.width, this.paintCanvas.height);
+
+    for (const s of strokes) {
+      if (s.points.length < 2) continue;
+      this.paintCtx.strokeStyle = s.color;
+      this.paintCtx.lineWidth = s.size * 2;
+      this.paintCtx.beginPath();
+
+      s.points.forEach(([tx, tz], i) => {
+        const cx = ((tx + width / 2) / width) * this.paintCanvas.width;
+        const cy = ((tz + length / 2) / length) * this.paintCanvas.height;
+        if (i === 0) this.paintCtx.moveTo(cx, cy);
+        else this.paintCtx.lineTo(cx, cy);
+      });
+      this.paintCtx.stroke();
+    }
+    this.paintTexture.needsUpdate = true;
+  }
+
+  public clearPaint() {
+    this.paintCtx.clearRect(0, 0, this.paintCanvas.width, this.paintCanvas.height);
+    this.paintTexture.needsUpdate = true;
+  }
+
+  // Flick Arrow Helper
+  private setupFlickArrow() {
+    const dir = new THREE.Vector3(0, 0, 1);
+    const origin = new THREE.Vector3(0, 0, 0);
+    this.flickArrowMesh = new THREE.ArrowHelper(dir, origin, 2, 0xef4444, 0.4, 0.3);
+    this.flickArrowMesh.visible = false;
+    this.scene.add(this.flickArrowMesh);
+  }
+
+  private updateFlickVisuals(start: THREE.Vector3, current: THREE.Vector3) {
+    if (!this.flickArrowMesh) return;
+    const diff = new THREE.Vector3().subVectors(start, current);
+    const dist = diff.length();
+    if (dist < 0.2) {
+      this.flickArrowMesh.visible = false;
+      return;
+    }
+    const dir = diff.clone().normalize();
+    this.flickArrowMesh.setDirection(dir);
+    this.flickArrowMesh.setLength(Math.min(6, dist * 1.5), 0.4, 0.25);
+    this.flickArrowMesh.position.set(start.x, start.y + 0.2, start.z);
+    this.flickArrowMesh.visible = true;
   }
 
   // Sync piece mesh from server definition
@@ -292,11 +544,11 @@ export class TabletopRenderer {
       this.pieceMeshes.set(data.id, mesh);
     }
 
-    // Set initial target transform
     this.pieceTargetTransforms.set(data.id, {
       pos: new THREE.Vector3(data.position.x, data.position.y, data.position.z),
       quat: new THREE.Quaternion(data.rotation.x, data.rotation.y, data.rotation.z, data.rotation.w),
       value: data.value,
+      isLocked: data.isLocked,
     });
 
     if (!mesh.position.lengthSq()) {
@@ -324,7 +576,7 @@ export class TabletopRenderer {
     this.grabbedPieceId = null;
   }
 
-  // Create high fidelity procedural 3D meshes for tabletop pieces
+  // Create 3D meshes for all pieces (including Counter, Custom Token, Text Label)
   private createPieceMesh(data: TabletopPieceData): THREE.Group {
     const group = new THREE.Group();
     group.name = data.id;
@@ -335,27 +587,88 @@ export class TabletopRenderer {
     const secColor = new THREE.Color(data.secondaryColor || '#0f172a');
 
     switch (data.type) {
+      case 'counter': {
+        // TTS 3D Digital Clickable Counter Token
+        const radius = (data.dimensions?.x || 1.1) / 2;
+        const height = data.dimensions?.y || 0.25;
+        const geo = new THREE.CylinderGeometry(radius, radius, height, 32);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 256;
+        const ctx = canvas.getContext('2d')!;
+
+        ctx.fillStyle = data.color || '#0284c7';
+        ctx.beginPath();
+        ctx.arc(128, 128, 120, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 6;
+        ctx.stroke();
+
+        ctx.fillStyle = '#0f172a';
+        ctx.roundRect(30, 75, 196, 106, 16);
+        ctx.fill();
+
+        ctx.fillStyle = '#38bdf8';
+        ctx.font = 'bold 54px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`${data.value !== undefined ? data.value : 0}`, 128, 128);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 24px sans-serif';
+        ctx.fillText(data.label || 'COUNTER', 128, 48);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        const topMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.25 });
+        const sideMat = new THREE.MeshStandardMaterial({ color: baseColor, roughness: 0.4 });
+
+        const counterMesh = new THREE.Mesh(geo, [sideMat, topMat, topMat]);
+        counterMesh.castShadow = true;
+        group.add(counterMesh);
+        break;
+      }
+
+      case 'custom_token': {
+        const radius = (data.dimensions?.x || 1.0) / 2;
+        const geo = new THREE.CylinderGeometry(radius, radius, 0.15, 24);
+
+        if (data.imageUrl) {
+          const loader = new THREE.TextureLoader();
+          loader.load(data.imageUrl, (tex) => {
+            const topMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.3 });
+            const sideMat = new THREE.MeshStandardMaterial({ color: baseColor, roughness: 0.4 });
+            const tokenMesh = new THREE.Mesh(geo, [sideMat, topMat, topMat]);
+            tokenMesh.castShadow = true;
+            group.add(tokenMesh);
+          });
+        } else {
+          const mat = new THREE.MeshStandardMaterial({ color: baseColor, roughness: 0.3 });
+          const tokenMesh = new THREE.Mesh(geo, mat);
+          tokenMesh.castShadow = true;
+          group.add(tokenMesh);
+        }
+        break;
+      }
+
       case 'dice_d6': {
         const size = data.dimensions?.x || 0.7;
         const geo = new THREE.BoxGeometry(size, size, size);
-
-        // Generate canvas textures for the 6 faces with dots
         const materials: THREE.Material[] = [];
-        const faceValues = [3, 4, 1, 6, 2, 5]; // Standard Three.js box face order (+X, -X, +Y, -Y, +Z, -Z)
+        const faceValues = [3, 4, 1, 6, 2, 5];
         for (const val of faceValues) {
           const canvas = document.createElement('canvas');
           canvas.width = 128;
           canvas.height = 128;
           const ctx = canvas.getContext('2d')!;
 
-          // Dice background with soft border
           ctx.fillStyle = data.color || '#ef4444';
           ctx.fillRect(0, 0, 128, 128);
           ctx.strokeStyle = '#ffffff33';
           ctx.lineWidth = 6;
           ctx.strokeRect(4, 4, 120, 120);
 
-          // Draw pips (dots)
           ctx.fillStyle = data.color === '#f8fafc' || data.color === '#ffffff' ? '#1e293b' : '#ffffff';
           const pips = this.getD6PipCoords(val);
           for (const [px, py] of pips) {
@@ -365,13 +678,7 @@ export class TabletopRenderer {
           }
 
           const tex = new THREE.CanvasTexture(canvas);
-          materials.push(
-            new THREE.MeshStandardMaterial({
-              map: tex,
-              roughness: 0.25,
-              metalness: 0.1,
-            })
-          );
+          materials.push(new THREE.MeshStandardMaterial({ map: tex, roughness: 0.25 }));
         }
 
         const cube = new THREE.Mesh(geo, materials);
@@ -392,7 +699,6 @@ export class TabletopRenderer {
         });
         const d20 = new THREE.Mesh(geo, mat);
         d20.castShadow = true;
-        d20.receiveShadow = true;
         group.add(d20);
         break;
       }
@@ -403,7 +709,6 @@ export class TabletopRenderer {
         const mat = new THREE.MeshStandardMaterial({
           color: baseColor,
           roughness: 0.3,
-          metalness: 0.15,
           flatShading: true,
         });
         const d4 = new THREE.Mesh(geo, mat);
@@ -418,7 +723,6 @@ export class TabletopRenderer {
         const mat = new THREE.MeshStandardMaterial({
           color: baseColor,
           roughness: 0.3,
-          metalness: 0.15,
           flatShading: true,
         });
         const d8 = new THREE.Mesh(geo, mat);
@@ -434,7 +738,6 @@ export class TabletopRenderer {
         const mat = new THREE.MeshStandardMaterial({
           color: baseColor,
           roughness: 0.3,
-          metalness: 0.15,
           flatShading: true,
         });
         const d12 = new THREE.Mesh(geo, mat);
@@ -447,23 +750,19 @@ export class TabletopRenderer {
         const w = data.dimensions?.x || 1.1;
         const h = data.dimensions?.y || 0.04;
         const d = data.dimensions?.z || 1.6;
-
         const geo = new THREE.BoxGeometry(w, h, d);
 
-        // Face texture
         const faceCanvas = document.createElement('canvas');
         faceCanvas.width = 256;
         faceCanvas.height = 360;
         const fctx = faceCanvas.getContext('2d')!;
 
-        // Card front
         fctx.fillStyle = '#ffffff';
         fctx.fillRect(0, 0, 256, 360);
         fctx.strokeStyle = '#e2e8f0';
         fctx.lineWidth = 4;
         fctx.strokeRect(6, 6, 244, 348);
 
-        // Card text / rank / suit
         const label = data.label || 'A♠';
         const isRed = label.includes('♥') || label.includes('♦') || data.secondaryColor === '#dc2626';
         fctx.fillStyle = isRed ? '#dc2626' : '#0f172a';
@@ -474,7 +773,6 @@ export class TabletopRenderer {
         fctx.textAlign = 'right';
         fctx.fillText(label, 236, 335);
 
-        // Center emblem
         fctx.font = '72px sans-serif';
         fctx.textAlign = 'center';
         fctx.textBaseline = 'middle';
@@ -482,7 +780,6 @@ export class TabletopRenderer {
 
         const faceTex = new THREE.CanvasTexture(faceCanvas);
 
-        // Back texture
         const backCanvas = document.createElement('canvas');
         backCanvas.width = 256;
         backCanvas.height = 360;
@@ -492,7 +789,6 @@ export class TabletopRenderer {
         bctx.strokeStyle = '#f8fafc';
         bctx.lineWidth = 8;
         bctx.strokeRect(10, 10, 236, 340);
-        // Ornate pattern
         bctx.fillStyle = '#2563eb';
         for (let i = 0; i < 8; i++) {
           bctx.strokeRect(20 + i * 10, 20 + i * 14, 216 - i * 20, 320 - i * 28);
@@ -503,9 +799,7 @@ export class TabletopRenderer {
         const faceMat = new THREE.MeshStandardMaterial({ map: faceTex, roughness: 0.3 });
         const backMat = new THREE.MeshStandardMaterial({ map: backTex, roughness: 0.3 });
 
-        // Materials array: [+X, -X, +Y (front), -Y (back), +Z, -Z]
-        const cardMats = [sideMat, sideMat, faceMat, backMat, sideMat, sideMat];
-        const cardMesh = new THREE.Mesh(geo, cardMats);
+        const cardMesh = new THREE.Mesh(geo, [sideMat, sideMat, faceMat, backMat, sideMat, sideMat]);
         cardMesh.castShadow = true;
         cardMesh.receiveShadow = true;
         group.add(cardMesh);
@@ -518,12 +812,64 @@ export class TabletopRenderer {
         const d = data.dimensions?.z || 1.65;
         const geo = new THREE.BoxGeometry(w, h, d);
 
-        const deckMat = new THREE.MeshStandardMaterial({
-          color: baseColor,
-          roughness: 0.3,
-          metalness: 0.1,
-        });
-        const deckMesh = new THREE.Mesh(geo, deckMat);
+        // Top Canvas: Card Back + Card Count
+        const topCanvas = document.createElement('canvas');
+        topCanvas.width = 256;
+        topCanvas.height = 360;
+        const tctx = topCanvas.getContext('2d')!;
+
+        tctx.fillStyle = data.color || '#1e3a8a';
+        tctx.fillRect(0, 0, 256, 360);
+        tctx.strokeStyle = '#f8fafc';
+        tctx.lineWidth = 10;
+        tctx.strokeRect(10, 10, 236, 340);
+
+        tctx.fillStyle = '#ffffff18';
+        for (let i = 0; i < 6; i++) {
+          tctx.strokeRect(20 + i * 12, 20 + i * 16, 216 - i * 24, 320 - i * 32);
+        }
+
+        // Card count badge
+        tctx.fillStyle = '#0f172a';
+        tctx.roundRect(40, 130, 176, 100, 14);
+        tctx.fill();
+        tctx.strokeStyle = '#f59e0b';
+        tctx.lineWidth = 4;
+        tctx.stroke();
+
+        const count = data.metadata?.cards?.length || data.value || 52;
+        tctx.fillStyle = '#f8fafc';
+        tctx.font = 'bold 44px monospace';
+        tctx.textAlign = 'center';
+        tctx.textBaseline = 'middle';
+        tctx.fillText(`${count}`, 128, 168);
+
+        tctx.font = 'bold 20px sans-serif';
+        tctx.fillStyle = '#f59e0b';
+        tctx.fillText('CARDS', 128, 204);
+
+        const topTex = new THREE.CanvasTexture(topCanvas);
+
+        // Sides Canvas (ribbed white card layers)
+        const sideCanvas = document.createElement('canvas');
+        sideCanvas.width = 128;
+        sideCanvas.height = 128;
+        const sctx = sideCanvas.getContext('2d')!;
+        sctx.fillStyle = '#f8fafc';
+        sctx.fillRect(0, 0, 128, 128);
+        sctx.fillStyle = '#cbd5e1';
+        for (let py = 0; py < 128; py += 4) {
+          sctx.fillRect(0, py, 128, 1.5);
+        }
+        const sideTex = new THREE.CanvasTexture(sideCanvas);
+        sideTex.wrapS = THREE.RepeatWrapping;
+        sideTex.wrapT = THREE.RepeatWrapping;
+
+        const sideMat = new THREE.MeshStandardMaterial({ map: sideTex, roughness: 0.6 });
+        const topMat = new THREE.MeshStandardMaterial({ map: topTex, roughness: 0.3 });
+        const bottomMat = new THREE.MeshStandardMaterial({ map: topTex, roughness: 0.4 });
+
+        const deckMesh = new THREE.Mesh(geo, [sideMat, sideMat, topMat, bottomMat, sideMat, sideMat]);
         deckMesh.castShadow = true;
         deckMesh.receiveShadow = true;
         group.add(deckMesh);
@@ -533,22 +879,18 @@ export class TabletopRenderer {
       case 'poker_chip': {
         const radius = (data.dimensions?.x || 0.75) / 2;
         const height = data.dimensions?.y || 0.12;
-
         const geo = new THREE.CylinderGeometry(radius, radius, height, 32);
 
-        // Canvas texture for top/bottom chip denomination & rim inserts
         const canvas = document.createElement('canvas');
         canvas.width = 256;
         canvas.height = 256;
         const ctx = canvas.getContext('2d')!;
 
-        // Chip main color
         ctx.fillStyle = data.color || '#dc2626';
         ctx.beginPath();
         ctx.arc(128, 128, 124, 0, Math.PI * 2);
         ctx.fill();
 
-        // Edge tick dashes
         ctx.strokeStyle = data.secondaryColor || '#ffffff';
         ctx.lineWidth = 14;
         for (let i = 0; i < 8; i++) {
@@ -558,17 +900,11 @@ export class TabletopRenderer {
           ctx.stroke();
         }
 
-        // Inner circle inlay
         ctx.fillStyle = '#f8fafc';
         ctx.beginPath();
         ctx.arc(128, 128, 70, 0, Math.PI * 2);
         ctx.fill();
 
-        ctx.strokeStyle = data.color || '#dc2626';
-        ctx.lineWidth = 5;
-        ctx.stroke();
-
-        // Denomination label
         ctx.fillStyle = '#0f172a';
         ctx.font = 'bold 42px sans-serif';
         ctx.textAlign = 'center';
@@ -587,20 +923,12 @@ export class TabletopRenderer {
       }
 
       case 'meeple': {
-        // Classic Carcassonne meeple using compound cylinder + spheres or extruded geometry
         const bodyGeo = new THREE.CylinderGeometry(0.3, 0.45, 0.7, 16);
         const headGeo = new THREE.SphereGeometry(0.22, 16, 16);
-        const meepleMat = new THREE.MeshStandardMaterial({
-          color: baseColor,
-          roughness: 0.4,
-          metalness: 0.05,
-        });
-
+        const meepleMat = new THREE.MeshStandardMaterial({ color: baseColor, roughness: 0.4 });
         const body = new THREE.Mesh(bodyGeo, meepleMat);
         body.castShadow = true;
-        body.position.y = 0;
         group.add(body);
-
         const head = new THREE.Mesh(headGeo, meepleMat);
         head.position.y = 0.45;
         head.castShadow = true;
@@ -610,12 +938,7 @@ export class TabletopRenderer {
 
       case 'pawn':
       case 'chess_piece': {
-        const pawnMat = new THREE.MeshStandardMaterial({
-          color: baseColor,
-          roughness: 0.35,
-          metalness: 0.1,
-        });
-
+        const pawnMat = new THREE.MeshStandardMaterial({ color: baseColor, roughness: 0.35 });
         const baseGeo = new THREE.CylinderGeometry(0.3, 0.35, 0.2, 16);
         const stemGeo = new THREE.CylinderGeometry(0.16, 0.25, 0.65, 16);
         const headGeo = new THREE.SphereGeometry(0.22, 16, 16);
@@ -642,29 +965,127 @@ export class TabletopRenderer {
         const h = data.dimensions?.y || 0.15;
         const d = data.dimensions?.z || 1.3;
         const geo = new THREE.BoxGeometry(w, h, d);
-
-        const dominoMat = new THREE.MeshStandardMaterial({
-          color: 0xfafafa,
-          roughness: 0.2,
-          metalness: 0.05,
-        });
+        const dominoMat = new THREE.MeshStandardMaterial({ color: 0xfafafa, roughness: 0.2 });
         const dominoMesh = new THREE.Mesh(geo, dominoMat);
         dominoMesh.castShadow = true;
-        dominoMesh.receiveShadow = true;
         group.add(dominoMesh);
+        break;
+      }
+
+      case 'dice_fate': {
+        const size = data.dimensions?.x || 0.7;
+        const geo = new THREE.BoxGeometry(size, size, size);
+        const materials: THREE.Material[] = [];
+        const fateSymbols = ['+', '+', '-', '-', ' ', ' '];
+        for (const sym of fateSymbols) {
+          const canvas = document.createElement('canvas');
+          canvas.width = 128;
+          canvas.height = 128;
+          const ctx = canvas.getContext('2d')!;
+
+          ctx.fillStyle = data.color || '#1e293b';
+          ctx.fillRect(0, 0, 128, 128);
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 6;
+          ctx.strokeRect(4, 4, 120, 120);
+
+          ctx.fillStyle = sym === '+' ? '#10b981' : sym === '-' ? '#ef4444' : '#94a3b8';
+          ctx.font = 'bold 72px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(sym, 64, 64);
+
+          const tex = new THREE.CanvasTexture(canvas);
+          materials.push(new THREE.MeshStandardMaterial({ map: tex, roughness: 0.3 }));
+        }
+
+        const fateCube = new THREE.Mesh(geo, materials);
+        fateCube.castShadow = true;
+        group.add(fateCube);
+        break;
+      }
+
+      case 'coin': {
+        const radius = (data.dimensions?.x || 0.8) / 2;
+        const height = data.dimensions?.y || 0.08;
+        const geo = new THREE.CylinderGeometry(radius, radius, height, 32);
+
+        const makeCoinFace = (text: string) => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 256;
+          canvas.height = 256;
+          const ctx = canvas.getContext('2d')!;
+
+          ctx.fillStyle = '#f59e0b';
+          ctx.beginPath();
+          ctx.arc(128, 128, 124, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.strokeStyle = '#b45309';
+          ctx.lineWidth = 10;
+          ctx.stroke();
+
+          ctx.fillStyle = '#78350f';
+          ctx.font = 'bold 44px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(text, 128, 128);
+
+          return new THREE.CanvasTexture(canvas);
+        };
+
+        const sideMat = new THREE.MeshStandardMaterial({ color: 0xd97706, metalness: 0.7, roughness: 0.3 });
+        const headsMat = new THREE.MeshStandardMaterial({ map: makeCoinFace('HEADS'), metalness: 0.5, roughness: 0.3 });
+        const tailsMat = new THREE.MeshStandardMaterial({ map: makeCoinFace('TAILS'), metalness: 0.5, roughness: 0.3 });
+
+        const coinMesh = new THREE.Mesh(geo, [sideMat, headsMat, tailsMat]);
+        coinMesh.castShadow = true;
+        group.add(coinMesh);
+        break;
+      }
+
+      case 'tablet': {
+        const w = data.dimensions?.x || 2.4;
+        const h = data.dimensions?.y || 0.1;
+        const d = data.dimensions?.z || 1.6;
+        const frameGeo = new THREE.BoxGeometry(w, h, d);
+        const frameMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.2, metalness: 0.4 });
+        const frameMesh = new THREE.Mesh(frameGeo, frameMat);
+        frameMesh.castShadow = true;
+        group.add(frameMesh);
+
+        const screenGeo = new THREE.PlaneGeometry(w * 0.9, d * 0.88);
+        const screenCanvas = document.createElement('canvas');
+        screenCanvas.width = 512;
+        screenCanvas.height = 360;
+        const sctx = screenCanvas.getContext('2d')!;
+        sctx.fillStyle = '#0284c7';
+        sctx.fillRect(0, 0, 512, 360);
+        sctx.fillStyle = '#ffffff';
+        sctx.font = 'bold 36px sans-serif';
+        sctx.textAlign = 'center';
+        sctx.fillText('TABLET BROWSER', 256, 120);
+        sctx.font = '22px sans-serif';
+        sctx.fillText('Click to Open Web Tablet / Rules', 256, 180);
+        sctx.strokeStyle = '#ffffff';
+        sctx.strokeRect(40, 220, 432, 70);
+        sctx.fillText('https://tabletopsimulator.com', 256, 265);
+
+        const screenTex = new THREE.CanvasTexture(screenCanvas);
+        const screenMat = new THREE.MeshBasicMaterial({ map: screenTex });
+        const screenMesh = new THREE.Mesh(screenGeo, screenMat);
+        screenMesh.rotation.x = -Math.PI / 2;
+        screenMesh.position.y = h / 2 + 0.005;
+        group.add(screenMesh);
         break;
       }
 
       default: {
         const size = data.dimensions?.x || 0.8;
         const geo = new THREE.BoxGeometry(size, size, size);
-        const mat = new THREE.MeshStandardMaterial({
-          color: baseColor,
-          roughness: 0.3,
-        });
+        const mat = new THREE.MeshStandardMaterial({ color: baseColor, roughness: 0.3 });
         const box = new THREE.Mesh(geo, mat);
         box.castShadow = true;
-        box.receiveShadow = true;
         group.add(box);
         break;
       }
@@ -720,23 +1141,14 @@ export class TabletopRenderer {
     }
   }
 
-  // Ruler setup
   private setupRulerVisuals() {
-    const lineMat = new THREE.LineBasicMaterial({
-      color: 0x38bdf8,
-      linewidth: 3,
-      depthTest: false,
-    });
-    const lineGeo = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(0, 0, 0),
-      new THREE.Vector3(0, 0, 0),
-    ]);
+    const lineMat = new THREE.LineBasicMaterial({ color: 0x38bdf8, linewidth: 3, depthTest: false });
+    const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0)]);
     this.rulerLine = new THREE.Line(lineGeo, lineMat);
     this.rulerLine.renderOrder = 999;
     this.rulerLine.visible = false;
     this.scene.add(this.rulerLine);
 
-    // Sprite label for distance display
     const labelCanvas = document.createElement('canvas');
     labelCanvas.width = 256;
     labelCanvas.height = 64;
@@ -751,7 +1163,6 @@ export class TabletopRenderer {
 
   public updateRuler(start: THREE.Vector3, end: THREE.Vector3) {
     if (!this.rulerLine || !this.rulerLabelMesh) return;
-
     this.rulerStart = start;
     this.rulerEnd = end;
 
@@ -762,17 +1173,14 @@ export class TabletopRenderer {
     this.rulerLine.geometry.setFromPoints(points);
     this.rulerLine.visible = true;
 
-    // Calculate distance
     const distUnits = start.distanceTo(end);
     const inches = (distUnits * 3.5).toFixed(1);
     const cm = (distUnits * 8.9).toFixed(1);
 
-    // Update sprite label text
     const canvas = (this.rulerLabelMesh.material.map as THREE.CanvasTexture).image as HTMLCanvasElement;
     const ctx = canvas.getContext('2d')!;
     ctx.clearRect(0, 0, 256, 64);
 
-    // Badge bubble
     ctx.fillStyle = '#0f172ae6';
     ctx.roundRect(10, 8, 236, 48, 12);
     ctx.fill();
@@ -807,7 +1215,6 @@ export class TabletopRenderer {
     if (this.rulerLabelMesh) this.rulerLabelMesh.visible = false;
   }
 
-  // Ping ripple in 3D
   public triggerPing(pos: Vector3D, colorHex: string = '#38bdf8') {
     const ringGeo = new THREE.RingGeometry(0.1, 0.25, 32);
     const ringMat = new THREE.MeshBasicMaterial({
@@ -828,7 +1235,6 @@ export class TabletopRenderer {
     });
   }
 
-  // Remote player cursor sync
   public syncPlayerCursors(players: PlayerPresence[], localPlayerId: string) {
     const activePlayerIds = new Set<string>();
 
@@ -842,12 +1248,9 @@ export class TabletopRenderer {
         this.scene.add(group);
         this.playerCursorMeshes.set(p.id, group);
       }
-
-      // Smooth lerp to player cursor position
       group.position.lerp(new THREE.Vector3(p.cursor.x, p.cursor.y, p.cursor.z), 0.4);
     }
 
-    // Clean up disconnected players
     for (const [id, mesh] of this.playerCursorMeshes.entries()) {
       if (!activePlayerIds.has(id)) {
         this.scene.remove(mesh);
@@ -860,7 +1263,6 @@ export class TabletopRenderer {
     const group = new THREE.Group();
     const pColor = new THREE.Color(player.color || '#38bdf8');
 
-    // 3D Pointer Cone
     const coneGeo = new THREE.ConeGeometry(0.25, 0.7, 16);
     coneGeo.rotateX(Math.PI);
     const coneMat = new THREE.MeshStandardMaterial({
@@ -873,18 +1275,12 @@ export class TabletopRenderer {
     cone.position.y = 0.35;
     group.add(cone);
 
-    // Laser beam pointing down to table
     const beamGeo = new THREE.CylinderGeometry(0.02, 0.02, 2, 8);
-    const beamMat = new THREE.MeshBasicMaterial({
-      color: pColor,
-      transparent: true,
-      opacity: 0.4,
-    });
+    const beamMat = new THREE.MeshBasicMaterial({ color: pColor, transparent: true, opacity: 0.4 });
     const beam = new THREE.Mesh(beamGeo, beamMat);
     beam.position.y = -1;
     group.add(beam);
 
-    // Player Name Sprite billboard
     const canvas = document.createElement('canvas');
     canvas.width = 256;
     canvas.height = 64;
@@ -914,7 +1310,6 @@ export class TabletopRenderer {
     return group;
   }
 
-  // Ingest server physics updates
   public applyPhysicsUpdates(updates: CompactPieceUpdate[]) {
     for (const u of updates) {
       const target = this.pieceTargetTransforms.get(u.id);
@@ -922,11 +1317,11 @@ export class TabletopRenderer {
         target.pos.set(u.p[0], u.p[1], u.p[2]);
         target.quat.set(u.r[0], u.r[1], u.r[2], u.r[3]);
         if (u.val !== undefined) target.value = u.val;
+        if (u.l !== undefined) target.isLocked = u.l;
       }
     }
   }
 
-  // Camera Orbit, Pan, and Smooth update
   public updateCameraTransform() {
     const { radius, theta, phi } = this.cameraSpherical;
     const x = this.cameraTarget.x + radius * Math.sin(phi) * Math.sin(theta);
@@ -942,7 +1337,7 @@ export class TabletopRenderer {
       case 'top_down':
         this.cameraSpherical.radius = 22;
         this.cameraSpherical.theta = 0;
-        this.cameraSpherical.phi = 0.05; // almost straight down
+        this.cameraSpherical.phi = 0.05;
         this.cameraTarget.set(0, 2, 0);
         break;
       case 'seat_south':
@@ -968,38 +1363,65 @@ export class TabletopRenderer {
     this.updateCameraTransform();
   }
 
-  // Pointer & Drag Event Handling
   private bindEvents() {
     const dom = this.renderer.domElement;
-
-    // Context menu disable so right click orbits cleanly
     dom.addEventListener('contextmenu', (e) => e.preventDefault());
 
-    // Pointer Down
+    // Alt key listener for card magnification/inspection
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Alt') {
+        this.isAltPressed = true;
+        if (this.hoveredPieceId && this.events.onPieceInspect) {
+          const mesh = this.pieceMeshes.get(this.hoveredPieceId);
+          if (mesh) {
+            this.events.onPieceInspect((mesh as any).pieceData);
+          }
+        }
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (e.key === 'Alt') {
+        this.isAltPressed = false;
+        if (this.events.onPieceInspect) {
+          this.events.onPieceInspect(null);
+        }
+      }
+    });
+
     dom.addEventListener('pointerdown', (e) => {
       this.updateMouseCoords(e);
       this.prevPointerX = e.clientX;
       this.prevPointerY = e.clientY;
 
-      // Right Click or Alt + Click: Orbit camera
       if (e.button === 2 || (e.button === 0 && e.altKey)) {
+        this.rightClickStartPos = { x: e.clientX, y: e.clientY };
+        this.rightClickStartTime = Date.now();
         this.isOrbiting = true;
         dom.setPointerCapture(e.pointerId);
         return;
       }
 
-      // Middle Click or Shift + Right Click: Pan camera
       if (e.button === 1 || (e.button === 2 && e.shiftKey)) {
         this.isPanning = true;
         dom.setPointerCapture(e.pointerId);
         return;
       }
 
-      // Left Click: Ruler or Piece interaction
       if (e.button === 0) {
         const tableHit = this.raycastTable();
 
-        if (this.isRulerMode) {
+        // 1. Paint Tool Mode
+        if (this.currentTool === 'paint') {
+          if (tableHit) {
+            this.currentDrawingPoints = [[tableHit.x, tableHit.z]];
+            dom.setPointerCapture(e.pointerId);
+          }
+          return;
+        }
+
+        // 2. Ruler Tool Mode
+        if (this.currentTool === 'ruler') {
           if (tableHit) {
             this.rulerStart = tableHit.clone();
             this.rulerEnd = tableHit.clone();
@@ -1009,13 +1431,58 @@ export class TabletopRenderer {
           return;
         }
 
-        // Raycast pieces
+        // 3. Flick Tool Mode
+        if (this.currentTool === 'flick') {
+          const pieceHit = this.raycastPieces();
+          if (pieceHit) {
+            this.flickTargetPieceId = (pieceHit as any).tabletopId;
+            this.flickStartPos = pieceHit.position.clone();
+            dom.setPointerCapture(e.pointerId);
+          }
+          return;
+        }
+
+        // 4. Default Grab Tool Mode & Selection
         const pieceHit = this.raycastPieces();
         if (pieceHit) {
           const pieceId = (pieceHit as any).tabletopId;
-          this.grabbedPieceId = pieceId;
+          const pieceData = (pieceHit as any).pieceData as TabletopPieceData;
 
-          // Setup drag plane horizontally at piece height + hover elevation
+          // If counter piece, check if click was on + or - sides
+          if (pieceData?.type === 'counter') {
+            const delta = e.shiftKey ? -1 : 1;
+            if (this.events.onCounterClick) {
+              this.events.onCounterClick(pieceId, delta);
+            }
+          }
+
+          // Handle Multi-Selection Click
+          if (e.shiftKey) {
+            // Shift+Click: Toggle selection
+            if (this.selectedPieceIds.has(pieceId)) {
+              this.selectedPieceIds.delete(pieceId);
+            } else {
+              this.selectedPieceIds.add(pieceId);
+            }
+          } else {
+            // Regular click: If clicking unselected item, make it the sole selection
+            if (!this.selectedPieceIds.has(pieceId)) {
+              this.selectedPieceIds.clear();
+              this.selectedPieceIds.add(pieceId);
+            }
+            // If already in selection, retain multi-selection so all can be dragged together!
+          }
+
+          this.updateSelectionHighlights();
+          if (this.events.onSelectionChange) {
+            this.events.onSelectionChange(Array.from(this.selectedPieceIds));
+          }
+
+          if (pieceData?.isLocked) {
+            return;
+          }
+
+          this.grabbedPieceId = pieceId;
           const pieceY = pieceHit.position.y + 0.6;
           this.dragPlane.setFromNormalAndCoplanarPoint(
             new THREE.Vector3(0, 1, 0),
@@ -1026,17 +1493,53 @@ export class TabletopRenderer {
           this.lastDragTime = Date.now();
           this.dragVelocity.set(0, 0, 0);
 
+          // Store relative offsets for all other selected pieces
+          this.multiDragOffsets.clear();
+          const primaryPos = pieceHit.position;
+          for (const otherId of this.selectedPieceIds) {
+            if (otherId === pieceId) continue;
+            const otherMesh = this.pieceMeshes.get(otherId);
+            if (otherMesh) {
+              this.multiDragOffsets.set(otherId, otherMesh.position.clone().sub(primaryPos));
+            }
+          }
+
           if (this.events.onPieceSelect) {
             this.events.onPieceSelect(pieceId);
           }
           dom.setPointerCapture(e.pointerId);
-        } else if (tableHit && this.events.onTableClick) {
-          this.events.onTableClick({ x: tableHit.x, y: tableHit.y, z: tableHit.z });
+        } else {
+          // Clicked empty table / space
+          if (!e.shiftKey) {
+            this.selectedPieceIds.clear();
+            this.updateSelectionHighlights();
+            if (this.events.onSelectionChange) {
+              this.events.onSelectionChange([]);
+            }
+          }
+
+          // Start Box Selection (Marquee Select)
+          this.isBoxSelecting = true;
+          this.boxSelectStart = { x: e.clientX, y: e.clientY };
+          this.boxSelectCurrent = { x: e.clientX, y: e.clientY };
+          if (this.events.onBoxSelectChange) {
+            this.events.onBoxSelectChange({
+              x1: e.clientX,
+              y1: e.clientY,
+              x2: e.clientX,
+              y2: e.clientY,
+              active: true,
+            });
+          }
+          dom.setPointerCapture(e.pointerId);
+
+          if (tableHit && this.events.onTableClick) {
+            this.events.onTableClick({ x: tableHit.x, y: tableHit.y, z: tableHit.z });
+          }
         }
       }
     });
 
-    // Pointer Move
     dom.addEventListener('pointermove', (e) => {
       this.updateMouseCoords(e);
       const dx = e.clientX - this.prevPointerX;
@@ -1056,7 +1559,6 @@ export class TabletopRenderer {
 
       if (this.isPanning) {
         const panSpeed = 0.02 * (this.cameraSpherical.radius / 20);
-        // Tangent vectors
         const forward = new THREE.Vector3()
           .subVectors(this.cameraTarget, this.camera.position)
           .setY(0)
@@ -1069,8 +1571,58 @@ export class TabletopRenderer {
         return;
       }
 
+      // Box Selection Marquee in Progress
+      if (this.isBoxSelecting) {
+        this.boxSelectCurrent = { x: e.clientX, y: e.clientY };
+        const minX = Math.min(this.boxSelectStart.x, this.boxSelectCurrent.x);
+        const maxX = Math.max(this.boxSelectStart.x, this.boxSelectCurrent.x);
+        const minY = Math.min(this.boxSelectStart.y, this.boxSelectCurrent.y);
+        const maxY = Math.max(this.boxSelectStart.y, this.boxSelectCurrent.y);
+
+        if (this.events.onBoxSelectChange) {
+          this.events.onBoxSelectChange({ x1: minX, y1: minY, x2: maxX, y2: maxY, active: true });
+        }
+
+        if (maxX - minX > 5 || maxY - minY > 5) {
+          const rect = dom.getBoundingClientRect();
+          for (const [id, mesh] of this.pieceMeshes.entries()) {
+            const screenPos = mesh.position.clone().project(this.camera);
+            if (screenPos.z < 1) {
+              const px = ((screenPos.x + 1) / 2) * rect.width + rect.left;
+              const py = ((-screenPos.y + 1) / 2) * rect.height + rect.top;
+              if (px >= minX && px <= maxX && py >= minY && py <= maxY) {
+                this.selectedPieceIds.add(id);
+              }
+            }
+          }
+          this.updateSelectionHighlights();
+          if (this.events.onSelectionChange) {
+            this.events.onSelectionChange(Array.from(this.selectedPieceIds));
+          }
+        }
+        return;
+      }
+
+      // Drawing with Paint Tool
+      if (this.currentTool === 'paint' && this.currentDrawingPoints.length > 0) {
+        const hit = this.raycastTable();
+        if (hit) {
+          this.currentDrawingPoints.push([hit.x, hit.z]);
+          // Render immediate stroke on local canvas
+          const { width, length } = this.currentTableConfig;
+          const cx = ((hit.x + width / 2) / width) * this.paintCanvas.width;
+          const cy = ((hit.z + length / 2) / length) * this.paintCanvas.height;
+          this.paintCtx.strokeStyle = this.isErasing ? '#00000000' : this.paintColor;
+          this.paintCtx.lineWidth = this.paintBrushSize * 2;
+          this.paintCtx.lineTo(cx, cy);
+          this.paintCtx.stroke();
+          this.paintTexture.needsUpdate = true;
+        }
+        return;
+      }
+
       // Ruler dragging
-      if (this.isRulerMode && this.rulerStart) {
+      if (this.currentTool === 'ruler' && this.rulerStart) {
         const hit = this.raycastTable();
         if (hit) {
           this.updateRuler(this.rulerStart, hit);
@@ -1078,30 +1630,54 @@ export class TabletopRenderer {
         return;
       }
 
-      // Dragging a grabbed piece
+      // Flick Tool aiming
+      if (this.currentTool === 'flick' && this.flickStartPos) {
+        const hit = this.raycastTable();
+        if (hit) {
+          this.updateFlickVisuals(this.flickStartPos, hit);
+        }
+        return;
+      }
+
+      // Dragging grabbed piece (and all multi-selected pieces!)
       if (this.grabbedPieceId) {
         this.raycaster.setFromCamera(this.mouse, this.camera);
         if (this.raycaster.ray.intersectPlane(this.dragPlane, this.dragPlaneIntersect)) {
-          // Clamp to table area + margin
           const maxX = this.currentTableConfig.width / 2 + 1.5;
           const maxZ = this.currentTableConfig.length / 2 + 1.5;
           const clampedX = Math.max(-maxX, Math.min(maxX, this.dragPlaneIntersect.x));
           const clampedZ = Math.max(-maxZ, Math.min(maxZ, this.dragPlaneIntersect.z));
 
           const targetPos = new THREE.Vector3(clampedX, this.dragPlaneIntersect.y, clampedZ);
-
-          // Update local predictive mesh position for instant responsiveness
           const mesh = this.pieceMeshes.get(this.grabbedPieceId);
           if (mesh) {
             mesh.position.copy(targetPos);
           }
 
-          // Calculate throw velocity
+          const multiUpdates: Array<{ pieceId: string; worldPos: Vector3D }> = [
+            { pieceId: this.grabbedPieceId, worldPos: { x: targetPos.x, y: targetPos.y, z: targetPos.z } },
+          ];
+
+          // Move all other selected pieces maintaining relative offsets
+          for (const [otherId, offset] of this.multiDragOffsets.entries()) {
+            const otherMesh = this.pieceMeshes.get(otherId);
+            if (otherMesh) {
+              const otherPos = targetPos.clone().add(offset);
+              otherMesh.position.copy(otherPos);
+              multiUpdates.push({
+                pieceId: otherId,
+                worldPos: { x: otherPos.x, y: otherPos.y, z: otherPos.z },
+              });
+            }
+          }
+
           const now = Date.now();
           const dt = Math.max(0.01, (now - this.lastDragTime) / 1000);
           this.dragVelocity.subVectors(targetPos, this.lastDragPos).divideScalar(dt);
           this.lastDragPos.copy(targetPos);
           this.lastDragTime = now;
+
+          this.syncSelectionHighlightPositions();
 
           if (this.events.onPieceDrag) {
             this.events.onPieceDrag(this.grabbedPieceId, {
@@ -1110,38 +1686,70 @@ export class TabletopRenderer {
               z: targetPos.z,
             });
           }
+          if (this.events.onMultiPieceDrag && multiUpdates.length > 1) {
+            this.events.onMultiPieceDrag(multiUpdates);
+          }
         }
         return;
       }
 
-      // Hover detection & pointer broadcast
+      // Hover
       const tableHit = this.raycastTable();
       if (tableHit && this.events.onPointerMove) {
-        this.events.onPointerMove(
-          { x: tableHit.x, y: tableHit.y, z: tableHit.z },
-          false
-        );
+        this.events.onPointerMove({ x: tableHit.x, y: tableHit.y, z: tableHit.z }, false);
       }
 
       const pieceHit = this.raycastPieces();
       const newHoverId = pieceHit ? (pieceHit as any).tabletopId : null;
       if (newHoverId !== this.hoveredPieceId) {
         this.hoveredPieceId = newHoverId;
-        dom.style.cursor = newHoverId ? 'grab' : this.isRulerMode ? 'crosshair' : 'default';
+        dom.style.cursor =
+          this.currentTool === 'paint'
+            ? 'crosshair'
+            : this.currentTool === 'ruler'
+            ? 'crosshair'
+            : this.currentTool === 'flick'
+            ? 'pointer'
+            : newHoverId
+            ? 'grab'
+            : 'default';
+
         if (this.events.onPieceHover) {
           this.events.onPieceHover(newHoverId);
+        }
+
+        // If Alt is held, update inspect preview
+        if (this.isAltPressed && this.events.onPieceInspect) {
+          this.events.onPieceInspect(pieceHit ? (pieceHit as any).pieceData : null);
         }
       }
     });
 
-    // Pointer Up
     dom.addEventListener('pointerup', (e) => {
       if (this.isOrbiting) {
         this.isOrbiting = false;
         try {
           dom.releasePointerCapture(e.pointerId);
         } catch (_) {}
+
+        // Check if quick right click without moving -> trigger context menu
+        if (this.rightClickStartPos) {
+          const dist = Math.hypot(e.clientX - this.rightClickStartPos.x, e.clientY - this.rightClickStartPos.y);
+          const dur = Date.now() - this.rightClickStartTime;
+          if (dist < 6 && dur < 400 && this.events.onContextMenu) {
+            const pieceHit = this.raycastPieces();
+            if (pieceHit) {
+              const pId = (pieceHit as any).tabletopId;
+              const pData = (pieceHit as any).pieceData as TabletopPieceData;
+              this.events.onContextMenu({ pieceId: pId, pieceData: pData, screenX: e.clientX, screenY: e.clientY });
+            } else {
+              this.events.onContextMenu({ screenX: e.clientX, screenY: e.clientY });
+            }
+          }
+          this.rightClickStartPos = null;
+        }
       }
+
       if (this.isPanning) {
         this.isPanning = false;
         try {
@@ -1149,9 +1757,73 @@ export class TabletopRenderer {
         } catch (_) {}
       }
 
+      // Finish Box Selection
+      if (this.isBoxSelecting) {
+        this.isBoxSelecting = false;
+        if (this.events.onBoxSelectChange) {
+          this.events.onBoxSelectChange({ x1: 0, y1: 0, x2: 0, y2: 0, active: false });
+        }
+        if (this.events.onSelectionChange) {
+          this.events.onSelectionChange(Array.from(this.selectedPieceIds));
+        }
+        try {
+          dom.releasePointerCapture(e.pointerId);
+        } catch (_) {}
+      }
+
+      // Finish paint stroke
+      if (this.currentTool === 'paint' && this.currentDrawingPoints.length > 1) {
+        if (this.events.onStrokeDrawn) {
+          this.events.onStrokeDrawn({
+            id: `str_${Date.now()}`,
+            color: this.isErasing ? '#00000000' : this.paintColor,
+            size: this.paintBrushSize,
+            points: this.currentDrawingPoints,
+          });
+        }
+        this.currentDrawingPoints = [];
+        try {
+          dom.releasePointerCapture(e.pointerId);
+        } catch (_) {}
+      }
+
+      // Finish flick
+      if (this.currentTool === 'flick' && this.flickTargetPieceId && this.flickStartPos) {
+        const tableHit = this.raycastTable();
+        if (tableHit) {
+          const impulseVec = new THREE.Vector3().subVectors(this.flickStartPos, tableHit).multiplyScalar(8);
+          if (this.events.onFlickRelease) {
+            this.events.onFlickRelease(this.flickTargetPieceId, {
+              x: impulseVec.x,
+              y: Math.max(1, impulseVec.length() * 0.3),
+              z: impulseVec.z,
+            });
+          }
+        }
+        this.flickTargetPieceId = null;
+        this.flickStartPos = null;
+        if (this.flickArrowMesh) this.flickArrowMesh.visible = false;
+        try {
+          dom.releasePointerCapture(e.pointerId);
+        } catch (_) {}
+      }
+
+      // Finish Grab Release (Single or Multi-piece)
       if (this.grabbedPieceId) {
         const releasedId = this.grabbedPieceId;
+        const releases: Array<{ pieceId: string; velocity: Vector3D }> = [
+          { pieceId: releasedId, velocity: { x: this.dragVelocity.x, y: this.dragVelocity.y, z: this.dragVelocity.z } },
+        ];
+
+        for (const otherId of this.multiDragOffsets.keys()) {
+          releases.push({
+            pieceId: otherId,
+            velocity: { x: this.dragVelocity.x, y: this.dragVelocity.y, z: this.dragVelocity.z },
+          });
+        }
+
         this.grabbedPieceId = null;
+        this.multiDragOffsets.clear();
         try {
           dom.releasePointerCapture(e.pointerId);
         } catch (_) {}
@@ -1163,31 +1835,30 @@ export class TabletopRenderer {
             z: this.dragVelocity.z,
           });
         }
+        if (releases.length > 1 && this.events.onMultiPieceRelease) {
+          this.events.onMultiPieceRelease(releases);
+        }
+        this.updateSelectionHighlights();
       }
 
-      if (this.isRulerMode && this.rulerStart) {
+      if (this.currentTool === 'ruler' && this.rulerStart) {
         try {
           dom.releasePointerCapture(e.pointerId);
         } catch (_) {}
       }
     });
 
-    // Zoom (Wheel)
     dom.addEventListener(
       'wheel',
       (e) => {
         e.preventDefault();
         const zoomDelta = e.deltaY * 0.02;
-        this.cameraSpherical.radius = Math.max(
-          5,
-          Math.min(50, this.cameraSpherical.radius + zoomDelta)
-        );
+        this.cameraSpherical.radius = Math.max(5, Math.min(50, this.cameraSpherical.radius + zoomDelta));
         this.updateCameraTransform();
       },
       { passive: false }
     );
 
-    // Resize
     window.addEventListener('resize', () => {
       this.handleResize();
     });
@@ -1213,7 +1884,7 @@ export class TabletopRenderer {
     return null;
   }
 
-  private raycastTable(): THREE.Vector3 | null {
+  public raycastTable(): THREE.Vector3 | null {
     this.raycaster.setFromCamera(this.mouse, this.camera);
     if (this.tableMesh) {
       const hits = this.raycaster.intersectObject(this.tableMesh, false);
@@ -1221,7 +1892,6 @@ export class TabletopRenderer {
         return hits[0].point;
       }
     }
-    // Fallback plane at table height
     const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -this.currentTableConfig.height);
     const pt = new THREE.Vector3();
     return this.raycaster.ray.intersectPlane(plane, pt);
@@ -1236,14 +1906,11 @@ export class TabletopRenderer {
     this.renderer.setSize(w, h);
   }
 
-  // Animation Loop: Interpolation & Rendering
   private renderLoop() {
     if (this.isDestroyed) return;
     this.animationFrameId = requestAnimationFrame(this.renderLoop);
 
-    // Smoothly interpolate pieces towards server authoritative positions
     for (const [id, mesh] of this.pieceMeshes.entries()) {
-      // Don't interpolate the locally dragged piece since player is controlling it in real-time
       if (id === this.grabbedPieceId) continue;
 
       const target = this.pieceTargetTransforms.get(id);
@@ -1253,7 +1920,6 @@ export class TabletopRenderer {
       }
     }
 
-    // Update active ping ripples
     const now = Date.now();
     for (let i = this.activePings.length - 1; i >= 0; i--) {
       const ping = this.activePings[i];
@@ -1270,7 +1936,228 @@ export class TabletopRenderer {
       }
     }
 
+    this.syncSelectionHighlightPositions();
+
     this.renderer.render(this.scene, this.camera);
+  }
+
+  // TTS Selection & Multi-Selection Highlight Management
+  public updateSelectionHighlights() {
+    // Remove highlights for unselected pieces
+    for (const [id, highlightMesh] of this.selectionHighlightMeshes.entries()) {
+      if (!this.selectedPieceIds.has(id)) {
+        this.selectionHighlightGroup.remove(highlightMesh);
+        if (highlightMesh.geometry) highlightMesh.geometry.dispose();
+        this.selectionHighlightMeshes.delete(id);
+      }
+    }
+
+    // Add or update highlights for selected pieces
+    for (const id of this.selectedPieceIds) {
+      const mesh = this.pieceMeshes.get(id);
+      if (!mesh) continue;
+
+      let highlightMesh = this.selectionHighlightMeshes.get(id);
+      if (!highlightMesh) {
+        const radius = (mesh as any).pieceData?.dimensions?.x
+          ? Math.max((mesh as any).pieceData.dimensions.x, (mesh as any).pieceData.dimensions.z || 1) * 0.75
+          : 0.9;
+
+        const ringGeo = new THREE.RingGeometry(radius * 0.9, radius * 1.15, 32);
+        ringGeo.rotateX(-Math.PI / 2);
+        const ringMat = new THREE.MeshBasicMaterial({
+          color: 0x38bdf8,
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 0.85,
+        });
+
+        highlightMesh = new THREE.Mesh(ringGeo, ringMat);
+        this.selectionHighlightGroup.add(highlightMesh);
+        this.selectionHighlightMeshes.set(id, highlightMesh);
+      }
+
+      highlightMesh.position.set(mesh.position.x, this.currentTableConfig.height + 0.03, mesh.position.z);
+    }
+  }
+
+  public syncSelectionHighlightPositions() {
+    if (this.selectedPieceIds.size === 0) return;
+    for (const [id, highlight] of this.selectionHighlightMeshes.entries()) {
+      const mesh = this.pieceMeshes.get(id);
+      if (mesh) {
+        highlight.position.x = mesh.position.x;
+        highlight.position.z = mesh.position.z;
+        highlight.position.y = this.currentTableConfig.height + 0.03;
+      }
+    }
+  }
+
+  public selectAll() {
+    for (const id of this.pieceMeshes.keys()) {
+      this.selectedPieceIds.add(id);
+    }
+    this.updateSelectionHighlights();
+    if (this.events.onSelectionChange) {
+      this.events.onSelectionChange(Array.from(this.selectedPieceIds));
+    }
+  }
+
+  public clearSelection() {
+    this.selectedPieceIds.clear();
+    this.updateSelectionHighlights();
+    if (this.events.onSelectionChange) {
+      this.events.onSelectionChange([]);
+    }
+  }
+
+  public selectPiece(id: string, toggle: boolean = false) {
+    if (toggle) {
+      if (this.selectedPieceIds.has(id)) {
+        this.selectedPieceIds.delete(id);
+      } else {
+        this.selectedPieceIds.add(id);
+      }
+    } else {
+      this.selectedPieceIds.clear();
+      this.selectedPieceIds.add(id);
+    }
+    this.updateSelectionHighlights();
+    if (this.events.onSelectionChange) {
+      this.events.onSelectionChange(Array.from(this.selectedPieceIds));
+    }
+  }
+
+  // TTS Snap Points Visuals (kb.tabletopsimulator.com/game-tools/snap-points-and-joints/)
+  public syncSnapPoints(points: SnapPoint[]) {
+    for (const mesh of this.snapPointMeshes.values()) {
+      this.scene.remove(mesh);
+    }
+    this.snapPointMeshes.clear();
+
+    for (const pt of points) {
+      const group = new THREE.Group();
+      group.position.set(pt.position.x, pt.position.y + 0.02, pt.position.z);
+
+      const ringGeo = new THREE.RingGeometry(0.3, 0.38, 24);
+      const ringMat = new THREE.MeshBasicMaterial({ color: 0xf59e0b, side: THREE.DoubleSide });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.rotation.x = -Math.PI / 2;
+      group.add(ring);
+
+      const crossGeo = new THREE.PlaneGeometry(0.08, 0.45);
+      const crossMat = new THREE.MeshBasicMaterial({ color: 0xf59e0b, side: THREE.DoubleSide });
+      const crossH = new THREE.Mesh(crossGeo, crossMat);
+      crossH.rotation.x = -Math.PI / 2;
+      crossH.rotation.z = Math.PI / 2;
+      group.add(crossH);
+      const crossV = new THREE.Mesh(crossGeo, crossMat);
+      crossV.rotation.x = -Math.PI / 2;
+      group.add(crossV);
+
+      this.scene.add(group);
+      this.snapPointMeshes.set(pt.id, group);
+    }
+  }
+
+  // TTS 3D Text Labels Visuals (kb.tabletopsimulator.com/game-tools/text-and-decals/)
+  public syncTextLabels(labels: TextLabel[]) {
+    for (const sprite of this.textLabelMeshes.values()) {
+      this.scene.remove(sprite);
+    }
+    this.textLabelMeshes.clear();
+
+    for (const lbl of labels) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 512;
+      canvas.height = 160;
+      const ctx = canvas.getContext('2d')!;
+
+      if (lbl.bgColor) {
+        ctx.fillStyle = lbl.bgColor;
+        ctx.roundRect(8, 8, 496, 144, 16);
+        ctx.fill();
+      }
+
+      ctx.fillStyle = lbl.color || '#f8fafc';
+      ctx.font = `bold ${Math.round((lbl.fontSize || 32) * 1.5)}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(lbl.text, 256, 80);
+
+      const tex = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+      const sprite = new THREE.Sprite(mat);
+      sprite.position.set(lbl.position.x, lbl.position.y + 0.5, lbl.position.z);
+      sprite.scale.set(3, 1, 1);
+
+      this.scene.add(sprite);
+      this.textLabelMeshes.set(lbl.id, sprite);
+    }
+  }
+
+  // TTS Decals Visuals (kb.tabletopsimulator.com/game-tools/text-and-decals/)
+  public syncDecals(decals: DecalData[]) {
+    for (const mesh of this.decalMeshes.values()) {
+      this.scene.remove(mesh);
+    }
+    this.decalMeshes.clear();
+
+    const loader = new THREE.TextureLoader();
+    for (const d of decals) {
+      const size = d.size || 1.5;
+      const geo = new THREE.PlaneGeometry(size, size);
+      loader.load(d.imageUrl, (tex) => {
+        const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.9, depthWrite: false });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.rotation.x = -Math.PI / 2;
+        mesh.rotation.z = d.rotationY || 0;
+        mesh.position.set(d.position.x, d.position.y + 0.015, d.position.z);
+        this.scene.add(mesh);
+        this.decalMeshes.set(d.id, mesh);
+      });
+    }
+  }
+
+  // TTS Joint Visual Connection Lines
+  public syncJoints(joints: JointData[]) {
+    while (this.jointLinesGroup.children.length > 0) {
+      const c = this.jointLinesGroup.children[0];
+      this.jointLinesGroup.remove(c);
+      if ((c as any).geometry) (c as any).geometry.dispose();
+    }
+
+    for (const j of joints) {
+      const meshA = this.pieceMeshes.get(j.pieceIdA);
+      const meshB = this.pieceMeshes.get(j.pieceIdB);
+      if (meshA && meshB) {
+        const points = [meshA.position, meshB.position];
+        const geo = new THREE.BufferGeometry().setFromPoints(points);
+        const color = j.type === 'fixed' ? 0x10b981 : j.type === 'spring' ? 0x38bdf8 : 0xf59e0b;
+        const mat = new THREE.LineBasicMaterial({ color, linewidth: 2 });
+        const line = new THREE.Line(geo, mat);
+        this.jointLinesGroup.add(line);
+      }
+    }
+  }
+
+  // TTS Camera Bookmarks (Ctrl+1..4 to save, Shift+1..4 to load)
+  public saveCameraBookmark(index: number) {
+    const bookmark: CameraBookmark = {
+      index,
+      target: { x: this.cameraTarget.x, y: this.cameraTarget.y, z: this.cameraTarget.z },
+      spherical: { ...this.cameraSpherical },
+    };
+    this.cameraBookmarks = this.cameraBookmarks.filter(b => b.index !== index);
+    this.cameraBookmarks.push(bookmark);
+  }
+
+  public loadCameraBookmark(index: number) {
+    const bm = this.cameraBookmarks.find(b => b.index === index);
+    if (!bm) return;
+    this.cameraTarget.set(bm.target.x, bm.target.y, bm.target.z);
+    this.cameraSpherical = { ...bm.spherical };
+    this.updateCameraTransform();
   }
 
   public destroy() {

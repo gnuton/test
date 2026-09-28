@@ -5,17 +5,54 @@
 import { TabletopPieceData, TableConfig } from './types.js';
 
 export function getPresetTableConfig(presetName: string): TableConfig {
+  const baseGrid = {
+    enabled: false,
+    type: 'square' as const,
+    size: 1.5,
+    snap: false,
+    color: '#38bdf8',
+    opacity: 0.3,
+  };
+
   switch (presetName) {
+    case 'blackjack':
+      return {
+        shape: 'rectangular',
+        width: 16,
+        length: 22,
+        height: 2.0,
+        feltColor: '#0f5132',
+        woodColor: '#2b1a0d',
+        hasRim: true,
+        gravity: 9.81,
+        environment: 'penthouse',
+        grid: { ...baseGrid },
+      };
+    case 'solitaire':
+      return {
+        shape: 'rectangular',
+        width: 16,
+        length: 22,
+        height: 2.0,
+        feltColor: '#1e3a5f',
+        woodColor: '#172554',
+        hasRim: true,
+        gravity: 9.81,
+        environment: 'studio',
+        grid: { ...baseGrid },
+      };
     case 'poker':
       return {
         shape: 'oval',
         width: 14,
         length: 22,
         height: 2.0,
-        feltColor: '#105634', // Classic casino green
+        feltColor: '#105634',
         woodColor: '#3a2010',
         hasRim: true,
         gravity: 9.81,
+        environment: 'penthouse',
+        grid: { ...baseGrid },
       };
     case 'chess':
       return {
@@ -23,10 +60,12 @@ export function getPresetTableConfig(presetName: string): TableConfig {
         width: 16,
         length: 16,
         height: 2.0,
-        feltColor: '#2b231c', // Dark chess table
+        feltColor: '#2b231c',
         woodColor: '#18120c',
         hasRim: true,
         gravity: 9.81,
+        environment: 'tavern',
+        grid: { ...baseGrid, enabled: true, size: 1.4 },
       };
     case 'dice_arena':
       return {
@@ -34,10 +73,38 @@ export function getPresetTableConfig(presetName: string): TableConfig {
         width: 15,
         length: 15,
         height: 2.0,
-        feltColor: '#6d1822', // Velvet red dice arena
+        feltColor: '#6d1822',
         woodColor: '#2c140e',
         hasRim: true,
         gravity: 9.81,
+        environment: 'space',
+        grid: { ...baseGrid },
+      };
+    case 'dungeon':
+      return {
+        shape: 'rectangular',
+        width: 20,
+        length: 26,
+        height: 2.0,
+        feltColor: '#1f2937',
+        woodColor: '#111827',
+        hasRim: true,
+        gravity: 9.81,
+        environment: 'tavern',
+        grid: { ...baseGrid, enabled: true, size: 1.5, snap: true },
+      };
+    case 'dominoes':
+      return {
+        shape: 'rectangular',
+        width: 16,
+        length: 20,
+        height: 2.0,
+        feltColor: '#064e3b',
+        woodColor: '#27170e',
+        hasRim: true,
+        gravity: 9.81,
+        environment: 'studio',
+        grid: { ...baseGrid },
       };
     case 'boardgame':
     case 'sandbox':
@@ -47,10 +114,12 @@ export function getPresetTableConfig(presetName: string): TableConfig {
         width: 16,
         length: 22,
         height: 2.0,
-        feltColor: '#1c4234', // Classic forest green
+        feltColor: '#1c4234',
         woodColor: '#3d2516',
         hasRim: true,
         gravity: 9.81,
+        environment: 'studio',
+        grid: { ...baseGrid },
       };
   }
 }
@@ -60,8 +129,189 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
   const y = tableHeight + 0.3;
 
   switch (presetName) {
+    case 'blackjack': {
+      // 52-card standard deck in dealer shoe
+      const ranks = ['A', 'K', 'Q', 'J', '10', '9', '8', '7', '6', '5', '4', '3', '2'];
+      const suits = ['♠', '♥', '♦', '♣'];
+      const shoeCards: string[] = [];
+      for (const s of suits) {
+        for (const r of ranks) {
+          shoeCards.push(`${r}${s}`);
+        }
+      }
+
+      pieces.push({
+        id: 'bj-shoe-deck',
+        type: 'card_deck',
+        name: 'Blackjack Shoe (52 Cards)',
+        position: { x: -4.5, y: y + 0.2, z: -2.5 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        mass: 0.4,
+        color: '#dc2626',
+        label: '52 CARDS',
+        value: 52,
+        metadata: {
+          cards: shoeCards,
+        },
+      });
+
+      // Dealer Hand: 1 face up (10♠), 1 face down (7♥ hole card)
+      pieces.push({
+        id: 'bj-dealer-1',
+        type: 'card',
+        name: 'Dealer Upcard: 10♠',
+        position: { x: -0.7, y, z: -2.2 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        mass: 0.04,
+        label: '10♠',
+        color: '#ffffff',
+        secondaryColor: '#0f172a',
+      });
+      pieces.push({
+        id: 'bj-dealer-hole',
+        type: 'card',
+        name: 'Dealer Hole Card: 7♥',
+        position: { x: 0.7, y, z: -2.2 },
+        rotation: { x: 0, y: 0, z: 1, w: 0 }, // Face down!
+        mass: 0.04,
+        label: '7♥',
+        color: '#ffffff',
+        secondaryColor: '#dc2626',
+      });
+
+      // Player Hand: A♦ + K♣ (Blackjack!)
+      pieces.push({
+        id: 'bj-player-1',
+        type: 'card',
+        name: 'Player Card: A♦',
+        position: { x: -0.7, y, z: 2.2 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        mass: 0.04,
+        label: 'A♦',
+        color: '#ffffff',
+        secondaryColor: '#dc2626',
+      });
+      pieces.push({
+        id: 'bj-player-2',
+        type: 'card',
+        name: 'Player Card: K♣',
+        position: { x: 0.7, y, z: 2.2 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        mass: 0.04,
+        label: 'K♣',
+        color: '#ffffff',
+        secondaryColor: '#0f172a',
+      });
+
+      // Player Bet Box: $25 Chip stack
+      for (let i = 0; i < 4; i++) {
+        pieces.push({
+          id: `bj-bet-chip-${i}`,
+          type: 'poker_chip',
+          name: '$25 Chip',
+          position: { x: 0, y: y + i * 0.13, z: 0.5 },
+          rotation: { x: 0, y: 0, z: 0, w: 1 },
+          mass: 0.08,
+          color: '#16a34a',
+          secondaryColor: '#ffffff',
+          value: 25,
+          label: '$25',
+        });
+      }
+
+      // Bank Chip Trays
+      const bjChips = [
+        { val: 5, color: '#dc2626', sec: '#ffffff', x: 2.5 },
+        { val: 25, color: '#16a34a', sec: '#ffffff', x: 3.5 },
+        { val: 100, color: '#1e293b', sec: '#eab308', x: 4.5 },
+      ];
+      bjChips.forEach((d) => {
+        for (let s = 0; s < 5; s++) {
+          pieces.push({
+            id: `bj-bank-${d.val}-${s}`,
+            type: 'poker_chip',
+            name: `$${d.val} Chip`,
+            position: { x: d.x, y: y + s * 0.13, z: -2.5 },
+            rotation: { x: 0, y: 0, z: 0, w: 1 },
+            mass: 0.08,
+            color: d.color,
+            secondaryColor: d.sec,
+            value: d.val,
+            label: `$${d.val}`,
+          });
+        }
+      });
+      break;
+    }
+
+    case 'solitaire': {
+      // Classic Klondike Solitaire setup
+      // 7 tableau columns with cards, draw deck, foundation cards
+      const colCards = [
+        ['K♠'],
+        ['Q♥', 'J♣'],
+        ['10♦', '9♠', '8♥'],
+        ['7♣', '6♦', '5♠', '4♥'],
+        ['3♣', '2♦', 'A♠', 'K♥', 'Q♦'],
+        ['J♠', '10♥', '9♣', '8♦', '7♠', '6♥'],
+        ['5♣', '4♦', '3♠', '2♥', 'A♦', 'K♣', 'Q♠'],
+      ];
+
+      colCards.forEach((cardsInCol, colIdx) => {
+        const colX = -4.5 + colIdx * 1.5;
+        cardsInCol.forEach((cardLabel, cardIdx) => {
+          const isTop = cardIdx === cardsInCol.length - 1;
+          const suit = cardLabel.slice(-1);
+          const isRed = suit === '♥' || suit === '♦';
+          pieces.push({
+            id: `sol-col-${colIdx}-${cardIdx}`,
+            type: 'card',
+            name: `Card ${cardLabel}`,
+            label: cardLabel,
+            position: { x: colX, y: y + cardIdx * 0.02, z: -0.5 + cardIdx * 0.45 },
+            // Top card is face up, undercards face down
+            rotation: isTop ? { x: 0, y: 0, z: 0, w: 1 } : { x: 0, y: 0, z: 1, w: 0 },
+            mass: 0.04,
+            color: '#ffffff',
+            secondaryColor: isRed ? '#dc2626' : '#0f172a',
+          });
+        });
+      });
+
+      // Draw Stock Deck (top left)
+      pieces.push({
+        id: 'sol-stock-deck',
+        type: 'card_deck',
+        name: 'Solitaire Stock (24 Cards)',
+        position: { x: -4.5, y: y + 0.2, z: -3.5 },
+        rotation: { x: 0, y: 0, z: 1, w: 0 }, // Face down
+        mass: 0.35,
+        color: '#1e3a8a',
+        label: 'STOCK (24)',
+        value: 24,
+      });
+
+      // 4 Foundation markers
+      const foundationSuits = ['♠', '♥', '♦', '♣'];
+      foundationSuits.forEach((s, idx) => {
+        const isRed = s === '♥' || s === '♦';
+        pieces.push({
+          id: `sol-foundation-${idx}`,
+          type: 'card',
+          name: `Foundation ${s}`,
+          label: `[ ${s} ]`,
+          position: { x: 0 + idx * 1.5, y: y, z: -3.5 },
+          rotation: { x: 0, y: 0, z: 0, w: 1 },
+          mass: 0.02,
+          color: '#f8fafc',
+          secondaryColor: isRed ? '#dc2626' : '#0f172a',
+          isLocked: true,
+        });
+      });
+      break;
+    }
+
     case 'poker': {
-      // Deck of cards at center-left
       pieces.push({
         id: 'deck-main',
         type: 'card_deck',
@@ -73,13 +323,12 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
         color: '#b91c1c',
       });
 
-      // Sample dealt cards
       const dealtCards = [
-        { label: 'A♠', color: '#ffffff', x: -1.2, z: 1.5, suit: '♠' },
-        { label: 'K♠', color: '#ffffff', x: 0.0, z: 1.5, suit: '♠' },
-        { label: 'Q♠', color: '#ffffff', x: 1.2, z: 1.5, suit: '♠' },
-        { label: 'J♠', color: '#ffffff', x: 2.4, z: 1.5, suit: '♠' },
-        { label: '10♠', color: '#ffffff', x: 3.6, z: 1.5, suit: '♠' },
+        { label: 'A♠', color: '#ffffff', x: -1.2, z: 1.5 },
+        { label: 'K♠', color: '#ffffff', x: 0.0, z: 1.5 },
+        { label: 'Q♠', color: '#ffffff', x: 1.2, z: 1.5 },
+        { label: 'J♠', color: '#ffffff', x: 2.4, z: 1.5 },
+        { label: '10♠', color: '#ffffff', x: 3.6, z: 1.5 },
       ];
       dealtCards.forEach((c, idx) => {
         pieces.push({
@@ -95,7 +344,6 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
         });
       });
 
-      // Dealer Button
       pieces.push({
         id: 'dealer-chip',
         type: 'poker_chip',
@@ -108,7 +356,20 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
         value: 0,
       });
 
-      // Stacks of chips: $1 White, $5 Red, $25 Green, $100 Black, $500 Purple
+      // Digital Pot Counter Token (TTS 3D Counter)
+      pieces.push({
+        id: 'pot-counter',
+        type: 'counter',
+        name: 'Pot Value Counter',
+        position: { x: 0, y: y + 0.1, z: -0.5 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        mass: 0.2,
+        value: 350,
+        label: 'POT',
+        color: '#0284c7',
+        isLocked: true,
+      });
+
       const chipDenoms = [
         { val: 1, color: '#f1f5f9', sec: '#0f172a', x: -3 },
         { val: 5, color: '#dc2626', sec: '#ffffff', x: -1.5 },
@@ -137,7 +398,6 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
     }
 
     case 'chess': {
-      // 8x8 standard chess layout
       const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
       const backRankWhite = ['Rook', 'Knight', 'Bishop', 'Queen', 'King', 'Bishop', 'Knight', 'Rook'];
       const backRankBlack = ['Rook', 'Knight', 'Bishop', 'Queen', 'King', 'Bishop', 'Knight', 'Rook'];
@@ -145,7 +405,6 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
       const step = 1.1;
       const startX = -((7 * step) / 2);
 
-      // White Pieces (Z = +4 to +3)
       backRankWhite.forEach((pieceName, i) => {
         pieces.push({
           id: `chess-w-${pieceName.toLowerCase()}-${i}`,
@@ -173,7 +432,6 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
         });
       }
 
-      // Black Pieces (Z = -4 to -3)
       backRankBlack.forEach((pieceName, i) => {
         pieces.push({
           id: `chess-b-${pieceName.toLowerCase()}-${i}`,
@@ -204,7 +462,6 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
     }
 
     case 'dice_arena': {
-      // Polyhedral set + multiple D6 dice
       const diceTypes = [
         { type: 'dice_d4', name: 'D4 Pyramidal', color: '#eab308', x: -4, z: -2 },
         { type: 'dice_d6', name: 'D6 Classic Red', color: '#dc2626', x: -2, z: -2 },
@@ -227,7 +484,6 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
         });
       });
 
-      // Extra Yahtzee / Farkle 5 D6 set in center
       for (let i = 0; i < 5; i++) {
         pieces.push({
           id: `dice-d6-set-${i}`,
@@ -243,10 +499,91 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
       break;
     }
 
+    case 'dungeon': {
+      // RPG Kit: dungeon figures, torches/markers, D20s, health counter tokens
+      pieces.push({
+        id: 'hero-paladin',
+        type: 'meeple',
+        name: 'Paladin Hero',
+        position: { x: -3, y: y, z: 3 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        mass: 0.2,
+        color: '#3b82f6',
+      });
+      pieces.push({
+        id: 'hero-wizard',
+        type: 'meeple',
+        name: 'Wizard Hero',
+        position: { x: -1.5, y: y, z: 3 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        mass: 0.2,
+        color: '#8b5cf6',
+      });
+      pieces.push({
+        id: 'monster-dragon',
+        type: 'pawn',
+        name: 'Red Dragon Boss',
+        position: { x: 0, y: y, z: -3 },
+        rotation: { x: 0, y: Math.PI, z: 0, w: 0 },
+        mass: 0.6,
+        color: '#dc2626',
+        dimensions: { x: 1.2, y: 2.2, z: 1.2 },
+      });
+
+      // Health counters
+      pieces.push({
+        id: 'counter-boss-hp',
+        type: 'counter',
+        name: 'Dragon HP Counter',
+        position: { x: 3, y: y, z: -3 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        mass: 0.2,
+        value: 120,
+        label: 'HP',
+        color: '#e11d48',
+        isLocked: true,
+      });
+
+      // D20 dice
+      pieces.push({
+        id: 'dungeon-d20',
+        type: 'dice_d20',
+        name: 'Attack D20',
+        position: { x: 0, y: y + 0.3, z: 0 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        mass: 0.25,
+        color: '#ea580c',
+        value: 20,
+      });
+      break;
+    }
+
+    case 'dominoes': {
+      // 28 Double-Six Domino Set
+      let idCount = 0;
+      for (let high = 0; high <= 6; high++) {
+        for (let low = 0; low <= high; low++) {
+          const row = high;
+          const col = low;
+          pieces.push({
+            id: `domino-${high}-${low}`,
+            type: 'domino',
+            name: `Domino [${high}|${low}]`,
+            position: { x: (col - 1.5) * 1.5, y: y + 0.1, z: (row - 3) * 1.8 },
+            rotation: { x: 0, y: 0, z: 0, w: 1 },
+            mass: 0.12,
+            color: '#f8fafc',
+            label: `${high}:${low}`,
+          });
+          idCount++;
+        }
+      }
+      break;
+    }
+
     case 'boardgame':
     case 'sandbox':
     default: {
-      // Meeples
       const meepleColors = [
         { color: '#dc2626', name: 'Red Meeple', x: -4, z: 2 },
         { color: '#2563eb', name: 'Blue Meeple', x: -2.5, z: 2 },
@@ -265,7 +602,6 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
         });
       });
 
-      // Pawns
       const pawnColors = [
         { color: '#dc2626', x: -3.5, z: 3.5 },
         { color: '#2563eb', x: -2, z: 3.5 },
@@ -284,7 +620,6 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
         });
       });
 
-      // Card Deck
       pieces.push({
         id: 'deck-main',
         type: 'card_deck',
@@ -296,7 +631,6 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
         label: 'CARDS',
       });
 
-      // 2 Hand Cards
       pieces.push({
         id: 'card-1',
         type: 'card',
@@ -318,7 +652,6 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
         color: '#ffffff',
       });
 
-      // Dice
       pieces.push({
         id: 'dice-d6-1',
         type: 'dice_d6',
@@ -350,7 +683,19 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
         value: 20,
       });
 
-      // Dominoes
+      // Digital Score Counter
+      pieces.push({
+        id: 'counter-score-1',
+        type: 'counter',
+        name: 'Score Counter',
+        position: { x: 0, y: y, z: 4 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        mass: 0.2,
+        value: 0,
+        label: 'SCORE',
+        color: '#059669',
+      });
+
       for (let i = 0; i < 4; i++) {
         pieces.push({
           id: `domino-${i}`,

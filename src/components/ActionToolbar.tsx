@@ -28,6 +28,8 @@ interface Props {
   onOpenSpawner: () => void;
   onToggleChat: () => void;
   unreadCount?: number;
+  onOpenDeckSearch?: () => void;
+  onFlipCoin?: () => void;
 }
 
 export const ActionToolbar: React.FC<Props> = ({
@@ -42,6 +44,8 @@ export const ActionToolbar: React.FC<Props> = ({
   onOpenSpawner,
   onToggleChat,
   unreadCount = 0,
+  onOpenDeckSearch,
+  onFlipCoin,
 }) => {
   const [showCardsDropdown, setShowCardsDropdown] = useState(false);
   const [tableFlipConfirm, setTableFlipConfirm] = useState(false);
@@ -77,6 +81,17 @@ export const ActionToolbar: React.FC<Props> = ({
         <span className="hidden sm:inline">Roll All</span>
       </button>
 
+      {/* Quick Coin Flip */}
+      {onFlipCoin && (
+        <button
+          onClick={onFlipCoin}
+          className="flex items-center gap-1 px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-bold transition shadow-sm"
+          title="Flip Coin"
+        >
+          <span className="text-sm">🪙</span>
+        </button>
+      )}
+
       {/* 3. Cards & Deck Popover */}
       <div className="relative">
         <button
@@ -93,7 +108,19 @@ export const ActionToolbar: React.FC<Props> = ({
         </button>
 
         {showCardsDropdown && (
-          <div className="absolute bottom-full mb-2 left-0 w-44 bg-slate-900 border border-slate-800 rounded-xl p-1.5 shadow-2xl space-y-1 text-xs">
+          <div className="absolute bottom-full mb-2 left-0 w-48 bg-slate-900 border border-slate-800 rounded-xl p-1.5 shadow-2xl space-y-1 text-xs">
+            {onOpenDeckSearch && (
+              <button
+                onClick={() => {
+                  onOpenDeckSearch();
+                  setShowCardsDropdown(false);
+                }}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-slate-200 hover:bg-slate-800 hover:text-white transition text-left"
+              >
+                <Layers className="w-3.5 h-3.5 text-amber-400" />
+                <span>Search / Sift Deck</span>
+              </button>
+            )}
             <button
               onClick={() => {
                 onShuffleDeck();

@@ -1,6 +1,6 @@
 /**
  * Tabletop Nexus - Server-Authoritative Physics World
- * Powered by cannon-es for headless Node.js physics simulation
+ * Powered by cannon-es with Tabletop Simulator features
  */
 
 import * as CANNON from 'cannon-es';
@@ -10,7 +10,9 @@ import {
   TableConfig,
   Vector3D,
   Quaternion4D,
-  PieceShapeType
+  PieceShapeType,
+  SnapPoint,
+  JointData
 } from '../types.js';
 
 interface GrabState {
@@ -26,18 +28,35 @@ export class TabletopPhysicsWorld {
   public world: CANNON.World;
   public bodies = new Map<string, CANNON.Body>();
   public pieceData = new Map<string, TabletopPieceData>();
-  public grabs = new Map<string, GrabState>(); // pieceId -> GrabState
+  public grabs = new Map<string, GrabState>();
   public tableConfig: TableConfig;
+  public snapPoints = new Map<string, SnapPoint>();
+  public joints = new Map<string, { data: JointData; constraint: CANNON.Constraint }>();
 
   private tableBody: CANNON.Body | null = null;
   private rimBodies: CANNON.Body[] = [];
   private floorBody: CANNON.Body | null = null;
 
   // Dice roll tracking
-  private rollingDice = new Set<string>(); // pieceId
+  private rollingDice = new Set<string>();
   private diceRollStartTimes = new Map<string, number>();
   private onDiceSettledCallback?: (pieceId: string, value: number, type: PieceShapeType, rollerName?: string) => void;
-  private onSoundEventCallback?: (sound: 'dice_clatter' | 'card_deal' | 'chip_clink' | 'wood_knock' | 'table_flip', intensity: number, pos?: Vector3D) => void;
+  private onSoundEventCallback?: (
+    sound:
+      | 'dice_clatter'
+      | 'card_deal'
+      | 'chip_clink'
+      | 'wood_knock'
+      | 'table_flip'
+      | 'flick'
+      | 'lock'
+      | 'turn_chime'
+      | 'timer_tick'
+      | 'timer_alarm'
+      | 'joint_snap',
+    intensity: number,
+    pos?: Vector3D
+  ) => void;
 
   // Materials
   private feltMaterial: CANNON.Material;
@@ -52,7 +71,6 @@ export class TabletopPhysicsWorld {
       gravity: new CANNON.Vec3(0, -tableConfig.gravity, 0),
     });
 
-    // Broadphase optimization
     this.world.broadphase = new CANNON.NaiveBroadphase();
     (this.world.solver as any).iterations = 10;
     this.world.allowSleep = true;
@@ -65,21 +83,18 @@ export class TabletopPhysicsWorld {
     this.chipMaterial = new CANNON.Material('chip');
 
     // Contact Materials
-    // Dice on felt: nice bounce and rolling friction
     this.world.addContactMaterial(
       new CANNON.ContactMaterial(this.diceMaterial, this.feltMaterial, {
         friction: 0.35,
         restitution: 0.45,
       })
     );
-    // Dice on dice: clack
     this.world.addContactMaterial(
       new CANNON.ContactMaterial(this.diceMaterial, this.diceMaterial, {
         friction: 0.3,
         restitution: 0.5,
       })
     );
-    // Chips on chips: high friction for neat stacking
     this.world.addContactMaterial(
       new CANNON.ContactMaterial(this.chipMaterial, this.chipMaterial, {
         friction: 0.8,
@@ -92,7 +107,6 @@ export class TabletopPhysicsWorld {
         restitution: 0.2,
       })
     );
-    // Cards: low restitution, moderate friction
     this.world.addContactMaterial(
       new CANNON.ContactMaterial(this.cardMaterial, this.feltMaterial, {
         friction: 0.5,
@@ -105,20 +119,89 @@ export class TabletopPhysicsWorld {
 
   public setCallbacks(callbacks: {
     onDiceSettled?: (pieceId: string, value: number, type: PieceShapeType, rollerName?: string) => void;
-    onSoundEvent?: (sound: 'dice_clatter' | 'card_deal' | 'chip_clink' | 'wood_knock' | 'table_flip', intensity: number, pos?: Vector3D) => void;
+    onSoundEvent?: (
+      sound:
+        | 'dice_clatter'
+        | 'card_deal'
+        | 'chip_clink'
+        | 'wood_knock'
+        | 'table_flip'
+        | 'flick'
+        | 'lock'
+        | 'turn_chime'
+        | 'timer_tick'
+        | 'timer_alarm'
+        | 'joint_snap',
+      intensity: number,
+      pos?: Vector3D
+    ) => void;
   }) {
     this.onDiceSettledCallback = callbacks.onDiceSettled;
     this.onSoundEventCallback = callbacks.onSoundEvent;
   }
 
+  public addSnapPoint(snapPoint: SnapPoint) {
+    this.snapPoints.set(snapPoint.id, snapPoint);
+  }
+
+  public removeSnapPoint(snapPointId: string) {
+    this.snapPoints.delete(snapPointId);
+  }
+
+  public addJoint(joint: JointData) {
+    const bodyA = this.bodies.get(joint.pieceIdA);
+    const bodyB = this.bodies.get(joint.pieceIdB);
+    if (!bodyA || !bodyB) return;
+
+    if (this.joints.has(joint.id)) {
+      this.removeJoint(joint.id);
+    }
+
+    bodyA.wakeUp();
+    bodyB.wakeUp();
+
+    let constraint: CANNON.Constraint;
+    if (joint.type === 'fixed') {
+      constraint = new CANNON.LockConstraint(bodyA, bodyB);
+    } else if (joint.type === 'spring') {
+      constraint = new CANNON.DistanceConstraint(bodyA, bodyB, bodyA.position.distanceTo(bodyB.position));
+    } else {
+      constraint = new CANNON.PointToPointConstraint(
+        bodyA,
+        new CANNON.Vec3(0, 0, 0),
+        bodyB,
+        bodyB.pointToLocalFrame(bodyA.position)
+      );
+    }
+
+    this.world.addConstraint(constraint);
+    this.joints.set(joint.id, { data: joint, constraint });
+    if (this.onSoundEventCallback) {
+      this.onSoundEventCallback('joint_snap', 0.8, {
+        x: (bodyA.position.x + bodyB.position.x) / 2,
+        y: (bodyA.position.y + bodyB.position.y) / 2,
+        z: (bodyA.position.z + bodyB.position.z) / 2,
+      });
+    }
+  }
+
+  public removeJoint(jointId: string) {
+    const j = this.joints.get(jointId);
+    if (j) {
+      this.world.removeConstraint(j.constraint);
+      this.joints.delete(jointId);
+    }
+  }
+
   public updateTableConfig(newConfig: Partial<TableConfig>) {
     Object.assign(this.tableConfig, newConfig);
-    this.world.gravity.set(0, -this.tableConfig.gravity, 0);
+    if (newConfig.gravity !== undefined) {
+      this.world.gravity.set(0, -this.tableConfig.gravity, 0);
+    }
     this.setupTableAndBoundaries();
   }
 
   private setupTableAndBoundaries() {
-    // Remove existing table & rims
     if (this.tableBody) {
       this.world.removeBody(this.tableBody);
       this.tableBody = null;
@@ -136,10 +219,9 @@ export class TabletopPhysicsWorld {
     const tableThickness = 0.5;
     const tableY = height;
 
-    // Table top surface
     const tableShape = new CANNON.Box(new CANNON.Vec3(width / 2, tableThickness / 2, length / 2));
     this.tableBody = new CANNON.Body({
-      mass: 0, // static
+      mass: 0,
       type: CANNON.Body.STATIC,
       material: this.feltMaterial,
       position: new CANNON.Vec3(0, tableY - tableThickness / 2, 0),
@@ -147,7 +229,6 @@ export class TabletopPhysicsWorld {
     this.tableBody.addShape(tableShape);
     this.world.addBody(this.tableBody);
 
-    // Table rims to prevent pieces from accidentally flying off
     if (hasRim) {
       const rimHeight = 0.4;
       const rimThickness = 0.2;
@@ -182,7 +263,6 @@ export class TabletopPhysicsWorld {
       this.rimBodies.push(westRim);
     }
 
-    // Floor catch plane 3 units below table
     const floorShape = new CANNON.Plane();
     this.floorBody = new CANNON.Body({ mass: 0 });
     this.floorBody.addShape(floorShape);
@@ -192,7 +272,6 @@ export class TabletopPhysicsWorld {
   }
 
   public addPiece(data: TabletopPieceData): CANNON.Body {
-    // If body already exists, remove it
     if (this.bodies.has(data.id)) {
       this.removePiece(data.id);
     }
@@ -202,7 +281,6 @@ export class TabletopPhysicsWorld {
     this.bodies.set(data.id, body);
     this.pieceData.set(data.id, { ...data });
 
-    // Collide listener for sound events
     body.addEventListener('collide', (e: any) => {
       const relVelocity = e.contact ? e.contact.getImpactVelocityAlongNormal() : 0;
       if (Math.abs(relVelocity) > 0.8 && this.onSoundEventCallback) {
@@ -246,6 +324,178 @@ export class TabletopPhysicsWorld {
     this.diceRollStartTimes.clear();
   }
 
+  // TTS 'L' Key: Toggle Lock / Pin piece in place
+  public toggleLock(pieceId: string): boolean {
+    const piece = this.pieceData.get(pieceId);
+    const body = this.bodies.get(pieceId);
+    if (!piece || !body) return false;
+
+    piece.isLocked = !piece.isLocked;
+
+    if (piece.isLocked) {
+      body.type = CANNON.Body.STATIC;
+      body.velocity.set(0, 0, 0);
+      body.angularVelocity.set(0, 0, 0);
+      if (this.onSoundEventCallback) {
+        this.onSoundEventCallback('lock', 0.8, piece.position);
+      }
+    } else {
+      body.type = CANNON.Body.DYNAMIC;
+      body.wakeUp();
+      if (this.onSoundEventCallback) {
+        this.onSoundEventCallback('lock', 0.8, piece.position);
+      }
+    }
+    return piece.isLocked;
+  }
+
+  // TTS Flick Tool
+  public flickPiece(pieceId: string, impulse: Vector3D) {
+    const body = this.bodies.get(pieceId);
+    const piece = this.pieceData.get(pieceId);
+    if (!body || !piece || piece.isLocked) return;
+
+    body.type = CANNON.Body.DYNAMIC;
+    body.wakeUp();
+
+    body.applyImpulse(new CANNON.Vec3(impulse.x, impulse.y, impulse.z));
+    if (this.onSoundEventCallback) {
+      this.onSoundEventCallback('flick', 0.9, piece.position);
+    }
+  }
+
+  // TTS Counter +/-
+  public modifyCounter(pieceId: string, delta: number): number {
+    const piece = this.pieceData.get(pieceId);
+    if (!piece) return 0;
+    piece.value = (piece.value || 0) + delta;
+    return piece.value;
+  }
+
+  // TTS 'G' Grouping: Stack cards into decks, or stack chips vertically
+  public groupPieces(pieceIds: string[]): { createdDeck?: TabletopPieceData; removedPieceIds: string[] } {
+    if (pieceIds.length < 2) return { removedPieceIds: [] };
+    const validPieces = pieceIds
+      .map((id) => this.pieceData.get(id))
+      .filter((p): p is TabletopPieceData => !!p);
+    if (validPieces.length < 2) return { removedPieceIds: [] };
+
+    const firstPiece = validPieces[0];
+    const baseX = firstPiece.position.x;
+    const baseZ = firstPiece.position.z;
+    const baseY = this.tableConfig.height + 0.25;
+
+    const areCards = validPieces.every((p) => p.type === 'card' || p.type === 'card_deck');
+
+    if (areCards) {
+      // Gather all card names/labels
+      const allCards: string[] = [];
+      const removedIds: string[] = [];
+
+      for (const piece of validPieces) {
+        if (piece.type === 'card_deck') {
+          const deckCards: string[] = piece.metadata?.cards || [];
+          if (deckCards.length > 0) {
+            allCards.push(...deckCards);
+          } else {
+            // Default 52 cards if empty
+            const ranks = ['A', 'K', 'Q', 'J', '10', '9', '8', '7', '6', '5', '4', '3', '2'];
+            const suits = ['♠', '♥', '♦', '♣'];
+            for (const s of suits) {
+              for (const r of ranks) {
+                allCards.push(`${r}${s}`);
+              }
+            }
+          }
+        } else {
+          allCards.push(piece.label || piece.name || 'Card');
+        }
+        removedIds.push(piece.id);
+        this.removePiece(piece.id);
+      }
+
+      // Create consolidated Deck
+      const deckId = `deck_grouped_${Date.now()}`;
+      const deckPiece: TabletopPieceData = {
+        id: deckId,
+        type: 'card_deck',
+        name: `Deck (${allCards.length} Cards)`,
+        position: { x: baseX, y: baseY, z: baseZ },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        mass: 0.35,
+        color: '#1e3a8a',
+        label: `${allCards.length} CARDS`,
+        value: allCards.length,
+        metadata: {
+          cards: allCards,
+        },
+      };
+
+      this.addPiece(deckPiece);
+
+      if (this.onSoundEventCallback) {
+        this.onSoundEventCallback('card_deal', 1.0, { x: baseX, y: baseY, z: baseZ });
+      }
+
+      return { createdDeck: deckPiece, removedPieceIds: removedIds };
+    }
+
+    // Stacking poker chips / checkers / dominoes
+    validPieces.forEach((piece, idx) => {
+      const body = this.bodies.get(piece.id);
+      if (body) {
+        body.wakeUp();
+        body.position.set(baseX, baseY + idx * 0.14, baseZ);
+        body.quaternion.set(0, 0, 0, 1);
+        body.velocity.set(0, 0, 0);
+        body.angularVelocity.set(0, 0, 0);
+      }
+    });
+
+    if (this.onSoundEventCallback) {
+      this.onSoundEventCallback('chip_clink', 0.9, { x: baseX, y: baseY, z: baseZ });
+    }
+
+    return { removedPieceIds: [] };
+  }
+
+  // Auto-stack card onto card or deck when dropped near it
+  public checkAutoStack(pieceId: string): { createdDeck?: TabletopPieceData; removedPieceIds: string[] } | null {
+    const droppedPiece = this.pieceData.get(pieceId);
+    if (!droppedPiece || (droppedPiece.type !== 'card' && droppedPiece.type !== 'card_deck')) {
+      return null;
+    }
+
+    const dropBody = this.bodies.get(pieceId);
+    if (!dropBody) return null;
+
+    let targetPiece: TabletopPieceData | null = null;
+    let minDistance = 1.25;
+
+    for (const [id, piece] of this.pieceData.entries()) {
+      if (id === pieceId) continue;
+      if (piece.type !== 'card' && piece.type !== 'card_deck') continue;
+
+      const body = this.bodies.get(id);
+      if (!body) continue;
+
+      const dx = dropBody.position.x - body.position.x;
+      const dz = dropBody.position.z - body.position.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+
+      if (dist < minDistance && Math.abs(dropBody.position.y - body.position.y) < 1.5) {
+        minDistance = dist;
+        targetPiece = piece;
+      }
+    }
+
+    if (targetPiece) {
+      return this.groupPieces([targetPiece.id, pieceId]);
+    }
+
+    return null;
+  }
+
   private createCannonBody(data: TabletopPieceData): CANNON.Body {
     const dims = data.dimensions || this.getDefaultDimensions(data.type);
     let shape: CANNON.Shape;
@@ -254,11 +504,25 @@ export class TabletopPhysicsWorld {
     let angularDamping = 0.2;
 
     switch (data.type) {
-      case 'dice_d6': {
+      case 'dice_d6':
+      case 'dice_fate': {
         shape = new CANNON.Box(new CANNON.Vec3(dims.x / 2, dims.y / 2, dims.z / 2));
         material = this.diceMaterial;
         linearDamping = 0.1;
         angularDamping = 0.15;
+        break;
+      }
+      case 'coin': {
+        shape = new CANNON.Cylinder(dims.x / 2, dims.x / 2, dims.y, 20);
+        material = this.chipMaterial;
+        linearDamping = 0.2;
+        angularDamping = 0.25;
+        break;
+      }
+      case 'tablet': {
+        shape = new CANNON.Box(new CANNON.Vec3(dims.x / 2, dims.y / 2, dims.z / 2));
+        material = this.woodMaterial;
+        linearDamping = 0.4;
         break;
       }
       case 'dice_d20':
@@ -266,8 +530,6 @@ export class TabletopPhysicsWorld {
       case 'dice_d8':
       case 'dice_d10':
       case 'dice_d4': {
-        // High fidelity polyhedral approximations or radius-based spheres/compounds
-        // A sphere with slight angular damping rolls realistically and avoids getting stuck
         const radius = dims.x / 2;
         shape = new CANNON.Sphere(radius);
         material = this.diceMaterial;
@@ -305,6 +567,19 @@ export class TabletopPhysicsWorld {
         angularDamping = 0.35;
         break;
       }
+      case 'counter': {
+        shape = new CANNON.Cylinder(dims.x / 2, dims.x / 2, dims.y, 16);
+        material = this.woodMaterial;
+        linearDamping = 0.3;
+        angularDamping = 0.4;
+        break;
+      }
+      case 'custom_token': {
+        shape = new CANNON.Cylinder(dims.x / 2, dims.x / 2, dims.y, 24);
+        material = this.woodMaterial;
+        linearDamping = 0.3;
+        break;
+      }
       case 'domino':
       case 'checker':
       case 'block':
@@ -317,8 +592,11 @@ export class TabletopPhysicsWorld {
       }
     }
 
+    const bodyType = data.isLocked ? CANNON.Body.STATIC : CANNON.Body.DYNAMIC;
+
     const body = new CANNON.Body({
-      mass: data.mass > 0 ? data.mass : 0.2,
+      mass: data.isLocked ? 0 : data.mass > 0 ? data.mass : 0.2,
+      type: bodyType,
       material,
       linearDamping,
       angularDamping,
@@ -332,8 +610,6 @@ export class TabletopPhysicsWorld {
     });
 
     body.addShape(shape);
-
-    // Sleep settings: piece sleeps when stationary to conserve server CPU
     body.sleepSpeedLimit = 0.1;
     body.sleepTimeLimit = 0.6;
 
@@ -343,7 +619,12 @@ export class TabletopPhysicsWorld {
   public getDefaultDimensions(type: PieceShapeType): Vector3D {
     switch (type) {
       case 'dice_d6':
+      case 'dice_fate':
         return { x: 0.7, y: 0.7, z: 0.7 };
+      case 'coin':
+        return { x: 0.8, y: 0.08, z: 0.8 };
+      case 'tablet':
+        return { x: 2.4, y: 0.1, z: 1.6 };
       case 'dice_d20':
         return { x: 0.9, y: 0.9, z: 0.9 };
       case 'dice_d4':
@@ -365,6 +646,10 @@ export class TabletopPhysicsWorld {
         return { x: 0.75, y: 0.8, z: 0.3 };
       case 'chess_piece':
         return { x: 0.65, y: 1.3, z: 0.65 };
+      case 'counter':
+        return { x: 1.1, y: 0.25, z: 1.1 };
+      case 'custom_token':
+        return { x: 1.0, y: 0.15, z: 1.0 };
       case 'domino':
         return { x: 0.6, y: 0.15, z: 1.3 };
       case 'checker':
@@ -375,13 +660,15 @@ export class TabletopPhysicsWorld {
     }
   }
 
-  // Handle player grabbing a piece
   public startGrab(pieceId: string, playerId: string, targetPos: Vector3D) {
+    const piece = this.pieceData.get(pieceId);
+    if (piece?.isLocked) return; // Cannot grab locked piece
+
     const body = this.bodies.get(pieceId);
     if (!body) return;
 
     body.wakeUp();
-    body.type = CANNON.Body.KINEMATIC; // Server-authoritative kinematic dragging
+    body.type = CANNON.Body.KINEMATIC;
     body.velocity.set(0, 0, 0);
     body.angularVelocity.set(0, 0, 0);
 
@@ -396,7 +683,6 @@ export class TabletopPhysicsWorld {
       lastTime: now,
     });
 
-    const piece = this.pieceData.get(pieceId);
     if (piece) {
       piece.grabbedBy = playerId;
     }
@@ -433,7 +719,6 @@ export class TabletopPhysicsWorld {
     if (!grab || !body) return;
 
     body.wakeUp();
-    // Rotate 180 degrees around local Z axis
     const flipQ = new CANNON.Quaternion();
     flipQ.setFromAxisAngle(new CANNON.Vec3(0, 0, 1), Math.PI);
     grab.targetRot = grab.targetRot.mult(flipQ);
@@ -447,19 +732,50 @@ export class TabletopPhysicsWorld {
   ) {
     const grab = this.grabs.get(pieceId);
     const body = this.bodies.get(pieceId);
+    const piece = this.pieceData.get(pieceId);
     if (!grab || grab.playerId !== playerId || !body) return;
 
-    body.type = CANNON.Body.DYNAMIC;
+    body.type = piece?.isLocked ? CANNON.Body.STATIC : CANNON.Body.DYNAMIC;
     body.wakeUp();
 
+    // Custom user-defined Snap Points
+    let snappedToPoint = false;
+    for (const snap of this.snapPoints.values()) {
+      const dx = body.position.x - snap.position.x;
+      const dz = body.position.z - snap.position.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist <= (snap.snapRadius || 1.2)) {
+        body.position.x = snap.position.x;
+        body.position.z = snap.position.z;
+        body.position.y = Math.max(body.position.y, snap.position.y + 0.1);
+        const rotQ = new CANNON.Quaternion();
+        rotQ.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), snap.rotationY || 0);
+        body.quaternion = rotQ;
+        body.velocity.set(0, 0, 0);
+        body.angularVelocity.set(0, 0, 0);
+        snappedToPoint = true;
+        if (this.onSoundEventCallback) {
+          this.onSoundEventCallback('wood_knock', 0.5, snap.position);
+        }
+        break;
+      }
+    }
+
+    // Auto-snap to grid if active and not thrown with high speed
+    if (!snappedToPoint && this.tableConfig.grid?.enabled && this.tableConfig.grid?.snap) {
+      const s = this.tableConfig.grid.size || 1.5;
+      const snappedX = Math.round(body.position.x / s) * s;
+      const snappedZ = Math.round(body.position.z / s) * s;
+      body.position.x = snappedX;
+      body.position.z = snappedZ;
+    }
+
     if (releaseVelocity) {
-      // Clamp reasonable throw velocity
       const vx = Math.max(-15, Math.min(15, releaseVelocity.x));
       const vy = Math.max(-5, Math.min(15, releaseVelocity.y));
       const vz = Math.max(-15, Math.min(15, releaseVelocity.z));
       body.velocity.set(vx, vy, vz);
     } else {
-      // Calculate velocity from recent drag delta
       const now = Date.now();
       const dt = Math.max(0.016, (now - grab.lastTime) / 1000);
       const vel = body.position.vsub(grab.lastPos).scale(1 / dt);
@@ -471,30 +787,27 @@ export class TabletopPhysicsWorld {
     }
 
     if (releaseAngularVel) {
-      body.angularVelocity.set(
-        releaseAngularVel.x,
-        releaseAngularVel.y,
-        releaseAngularVel.z
-      );
+      body.angularVelocity.set(releaseAngularVel.x, releaseAngularVel.y, releaseAngularVel.z);
     }
 
     this.grabs.delete(pieceId);
-    const piece = this.pieceData.get(pieceId);
     if (piece) {
       piece.grabbedBy = null;
     }
+
+    // Check if dropped card/deck auto-stacks into an adjacent card/deck
+    const autoStacked = this.checkAutoStack(pieceId);
+    return autoStacked;
   }
 
-  // Roll dice with realistic server torque & upward impulse
   public rollDice(pieceId: string, rollerName?: string, forceMultiplier: number = 1.0) {
     const body = this.bodies.get(pieceId);
     const piece = this.pieceData.get(pieceId);
-    if (!body || !piece) return;
+    if (!body || !piece || piece.isLocked) return;
 
     body.type = CANNON.Body.DYNAMIC;
     body.wakeUp();
 
-    // Lift slightly if resting
     if (body.position.y < this.tableConfig.height + 0.3) {
       body.position.y = this.tableConfig.height + 0.6;
     }
@@ -504,7 +817,6 @@ export class TabletopPhysicsWorld {
     const horizontalZ = (Math.random() - 0.5) * 5 * forceMultiplier;
     body.velocity.set(horizontalX, upwardImpulse, horizontalZ);
 
-    // Chaotic spin
     const torqueX = (Math.random() - 0.5) * 40 * forceMultiplier;
     const torqueY = (Math.random() - 0.5) * 40 * forceMultiplier;
     const torqueZ = (Math.random() - 0.5) * 40 * forceMultiplier;
@@ -524,19 +836,21 @@ export class TabletopPhysicsWorld {
 
   public rollAllDice(rollerName?: string) {
     for (const [id, piece] of this.pieceData.entries()) {
-      if (piece.type.startsWith('dice_')) {
+      if (piece.type.startsWith('dice_') && !piece.isLocked) {
         this.rollDice(id, rollerName);
       }
     }
   }
 
-  // The legendary Table Flip!
+  // The iconic Table Flip! (Locked pieces stay grounded!)
   public flipTable(force: number = 1.0) {
     for (const [id, body] of this.bodies.entries()) {
+      const piece = this.pieceData.get(id);
+      if (piece?.isLocked) continue; // Locked items don't fly!
+
       body.type = CANNON.Body.DYNAMIC;
       body.wakeUp();
 
-      // Launch upwards and randomly outwards
       const distFromCenter = Math.sqrt(body.position.x * body.position.x + body.position.z * body.position.z);
       const angle = Math.atan2(body.position.z, body.position.x) + (Math.random() - 0.5) * 0.5;
 
@@ -561,12 +875,10 @@ export class TabletopPhysicsWorld {
     }
   }
 
-  // Step physics simulation by fixed delta time
   public step(dt: number): CompactPieceUpdate[] {
     const updates: CompactPieceUpdate[] = [];
-
-    // Apply grab kinematic positions smoothly
     const now = Date.now();
+
     for (const [pieceId, grab] of this.grabs.entries()) {
       const body = this.bodies.get(pieceId);
       if (!body) continue;
@@ -574,20 +886,16 @@ export class TabletopPhysicsWorld {
       grab.lastPos.copy(body.position);
       grab.lastTime = now;
 
-      // Kinematic interpolation towards target
       body.position.lerp(grab.targetPos, 0.45, body.position);
-      // Slerp quaternion
-      body.quaternion = body.quaternion.clone(); // safe copy
+      body.quaternion = body.quaternion.clone();
       body.quaternion.slerp(grab.targetRot, 0.45, body.quaternion);
 
       body.velocity.set(0, 0, 0);
       body.angularVelocity.set(0, 0, 0);
     }
 
-    // Step CANNON world
     this.world.step(dt);
 
-    // Check rolling dice settling
     for (const pieceId of Array.from(this.rollingDice)) {
       const body = this.bodies.get(pieceId);
       const startTime = this.diceRollStartTimes.get(pieceId) || 0;
@@ -601,7 +909,6 @@ export class TabletopPhysicsWorld {
       const speed = body.velocity.length();
       const rotSpeed = body.angularVelocity.length();
 
-      // Check if settled (after minimum roll time of 600ms)
       if (elapsed > 600 && speed < 0.15 && rotSpeed < 0.25) {
         this.rollingDice.delete(pieceId);
         const settledValue = this.determineDiceValue(piece.type, body.quaternion);
@@ -612,12 +919,10 @@ export class TabletopPhysicsWorld {
       }
     }
 
-    // Gather updates for active / moving bodies
     for (const [id, body] of this.bodies.entries()) {
       const piece = this.pieceData.get(id);
       if (!piece) continue;
 
-      // Sync piece data position
       piece.position = { x: body.position.x, y: body.position.y, z: body.position.z };
       piece.rotation = {
         x: body.quaternion.x,
@@ -627,7 +932,6 @@ export class TabletopPhysicsWorld {
       };
       piece.isSleeping = body.sleepState === CANNON.Body.SLEEPING;
 
-      // Respawn safeguard if piece falls way below the floor
       if (body.position.y < -5) {
         body.position.set((Math.random() - 0.5) * 2, this.tableConfig.height + 0.8, (Math.random() - 0.5) * 2);
         body.velocity.set(0, 0, 0);
@@ -635,7 +939,6 @@ export class TabletopPhysicsWorld {
         body.wakeUp();
       }
 
-      // Compact payload: round numbers to 3 decimals to save bandwidth over WebSocket
       updates.push({
         id,
         p: [
@@ -651,6 +954,7 @@ export class TabletopPhysicsWorld {
         ],
         s: body.sleepState === CANNON.Body.SLEEPING,
         g: piece.grabbedBy || null,
+        l: piece.isLocked,
         val: piece.value,
       });
     }
@@ -658,15 +962,10 @@ export class TabletopPhysicsWorld {
     return updates;
   }
 
-  // Calculate which face is pointing up for settled dice
   public determineDiceValue(type: PieceShapeType, quat: CANNON.Quaternion): number {
     const worldUp = new CANNON.Vec3(0, 1, 0);
 
     if (type === 'dice_d6') {
-      // Standard D6 opposite faces sum to 7:
-      // +Y: 1, -Y: 6
-      // +Z: 2, -Z: 5
-      // +X: 3, -X: 4
       const localFaces = [
         { normal: new CANNON.Vec3(0, 1, 0), value: 1 },
         { normal: new CANNON.Vec3(0, -1, 0), value: 6 },
@@ -679,7 +978,6 @@ export class TabletopPhysicsWorld {
       let maxDot = -Infinity;
       let topVal = 1;
       for (const face of localFaces) {
-        // Transform local face normal to world space
         const worldNormal = quat.vmult(face.normal);
         const dot = worldNormal.dot(worldUp);
         if (dot > maxDot) {
@@ -691,7 +989,6 @@ export class TabletopPhysicsWorld {
     }
 
     if (type === 'dice_d20') {
-      // For D20, derive a deterministic face index from the top-most vector or pseudo-random roll
       return 1 + Math.floor(Math.abs(quat.x * 7 + quat.y * 11 + quat.z * 13 + quat.w * 17) * 1000) % 20;
     }
 
@@ -711,6 +1008,40 @@ export class TabletopPhysicsWorld {
       return 1 + Math.floor(Math.abs(quat.y * 7 + quat.w * 13) * 1000) % 12;
     }
 
+    if (type === 'dice_fate') {
+      const topFace = this.determineDiceValue('dice_d6', quat);
+      if (topFace === 1 || topFace === 2) return -1; // Minus
+      if (topFace === 3 || topFace === 4) return 0;  // Blank
+      return 1;                                      // Plus
+    }
+
+    if (type === 'coin') {
+      const coinUp = quat.vmult(new CANNON.Vec3(0, 1, 0));
+      return coinUp.dot(worldUp) > 0 ? 1 : 2; // 1 = Heads, 2 = Tails
+    }
+
     return 1;
+  }
+
+  public flipCoin(pieceId: string, rollerName?: string) {
+    const body = this.bodies.get(pieceId);
+    const piece = this.pieceData.get(pieceId);
+    if (!body || !piece || piece.isLocked) return;
+
+    body.type = CANNON.Body.DYNAMIC;
+    body.wakeUp();
+    body.velocity.set((Math.random() - 0.5) * 1.5, 4.5 + Math.random() * 2, (Math.random() - 0.5) * 1.5);
+    body.angularVelocity.set((Math.random() - 0.5) * 50, 0, (Math.random() - 0.5) * 50);
+
+    this.rollingDice.add(pieceId);
+    this.diceRollStartTimes.set(pieceId, Date.now());
+
+    if (this.onSoundEventCallback) {
+      this.onSoundEventCallback('chip_clink', 0.9, {
+        x: body.position.x,
+        y: body.position.y,
+        z: body.position.z,
+      });
+    }
   }
 }
