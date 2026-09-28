@@ -18,7 +18,8 @@ import {
   TextLabel,
   DecalData,
   CameraBookmark,
-  calculateDeckHeight
+  calculateDeckHeight,
+  calculateDeckHeightFromMetadata
 } from '../types.js';
 
 export interface RendererEvents {
@@ -59,9 +60,12 @@ export class TabletopRenderer {
   public isBoxSelecting = false;
   public boxSelectStart = { x: 0, y: 0 };
   public boxSelectCurrent = { x: 0, y: 0 };
+  public boxSelectInitialSelection = new Set<string>();
+  public boxSelectAccumulated = new Set<string>();
   public selectionHighlightGroup = new THREE.Group();
   private selectionHighlightMeshes = new Map<string, THREE.Mesh>();
   private multiDragOffsets = new Map<string, THREE.Vector3>();
+  private tabletopiaRingTexture: THREE.CanvasTexture | null = null;
 
   // Right-click context click detection
   private rightClickStartPos: { x: number; y: number } | null = null;
@@ -112,6 +116,18 @@ export class TabletopRenderer {
   private flickStartPos: THREE.Vector3 | null = null;
   private flickTargetPieceId: string | null = null;
   private flickArrowMesh: THREE.ArrowHelper | null = null;
+
+  // 3D Transform Gizmo State (F9 Tool)
+  public gizmoGroup = new THREE.Group();
+  public gizmoTargetPieceId: string | null = null;
+  public activeGizmoAxis: 'x' | 'y' | 'z' | 'rotY' | null = null;
+  public hoveredGizmoAxis: 'x' | 'y' | 'z' | 'rotY' | null = null;
+  private gizmoHandles: Array<{ name: 'x' | 'y' | 'z' | 'rotY'; mesh: THREE.Mesh | THREE.Group; mat: THREE.MeshStandardMaterial; origColor: number; highlightColor: number }> = [];
+  private gizmoDragStartPoint = new THREE.Vector3();
+  private gizmoDragStartScreen = { x: 0, y: 0 };
+  private gizmoPieceStartPos = new THREE.Vector3();
+  private gizmoPieceStartRot = new THREE.Quaternion();
+  private gizmoDragPlane = new THREE.Plane();
 
   // Camera State
   public isOrbiting = false;
@@ -184,6 +200,7 @@ export class TabletopRenderer {
     this.setupRulerVisuals();
     this.setupFlickArrow();
     this.setupStackGuide();
+    this.setupTransformGizmo();
 
     // 7. Bind Events
     this.bindEvents();
@@ -540,19 +557,119 @@ export class TabletopRenderer {
     this.flickArrowMesh.visible = true;
   }
 
+  // 3D Transform Gizmo Setup (F9 Tool)
+  private setupTransformGizmo() {
+    this.gizmoGroup = new THREE.Group();
+    this.gizmoGroup.visible = false;
+    this.gizmoHandles = [];
+
+    // Shaft & Head geometries
+    const shaftGeo = new THREE.CylinderGeometry(0.04, 0.04, 1.3, 16);
+    const coneGeo = new THREE.ConeGeometry(0.13, 0.38, 16);
+
+    // X Axis: Red
+    const xGroup = new THREE.Group();
+    const xMat = new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.3, metalness: 0.2 });
+    const xShaft = new THREE.Mesh(shaftGeo, xMat);
+    xShaft.rotation.z = -Math.PI / 2;
+    xShaft.position.x = 0.65;
+    const xCone = new THREE.Mesh(coneGeo, xMat);
+    xCone.rotation.z = -Math.PI / 2;
+    xCone.position.x = 1.3 + 0.19;
+    xGroup.add(xShaft);
+    xGroup.add(xCone);
+    (xGroup as any).gizmoAxis = 'x';
+    this.gizmoGroup.add(xGroup);
+    this.gizmoHandles.push({ name: 'x', mesh: xGroup, mat: xMat, origColor: 0xef4444, highlightColor: 0xfca5a5 });
+
+    // Y Axis: Green
+    const yGroup = new THREE.Group();
+    const yMat = new THREE.MeshStandardMaterial({ color: 0x10b981, roughness: 0.3, metalness: 0.2 });
+    const yShaft = new THREE.Mesh(shaftGeo, yMat);
+    yShaft.position.y = 0.65;
+    const yCone = new THREE.Mesh(coneGeo, yMat);
+    yCone.position.y = 1.3 + 0.19;
+    yGroup.add(yShaft);
+    yGroup.add(yCone);
+    (yGroup as any).gizmoAxis = 'y';
+    this.gizmoGroup.add(yGroup);
+    this.gizmoHandles.push({ name: 'y', mesh: yGroup, mat: yMat, origColor: 0x10b981, highlightColor: 0x6ee7b7 });
+
+    // Z Axis: Blue
+    const zGroup = new THREE.Group();
+    const zMat = new THREE.MeshStandardMaterial({ color: 0x3b82f6, roughness: 0.3, metalness: 0.2 });
+    const zShaft = new THREE.Mesh(shaftGeo, zMat);
+    zShaft.rotation.x = Math.PI / 2;
+    zShaft.position.z = 0.65;
+    const zCone = new THREE.Mesh(coneGeo, zMat);
+    zCone.rotation.x = Math.PI / 2;
+    zCone.position.z = 1.3 + 0.19;
+    zGroup.add(zShaft);
+    zGroup.add(zCone);
+    (zGroup as any).gizmoAxis = 'z';
+    this.gizmoGroup.add(zGroup);
+    this.gizmoHandles.push({ name: 'z', mesh: zGroup, mat: zMat, origColor: 0x3b82f6, highlightColor: 0x93c5fd });
+
+    // Rotation Ring around Y: Yellow
+    const rotGeo = new THREE.TorusGeometry(1.6, 0.045, 16, 48);
+    rotGeo.rotateX(Math.PI / 2);
+    const rotMat = new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.3, metalness: 0.2 });
+    const rotMesh = new THREE.Mesh(rotGeo, rotMat);
+    (rotMesh as any).gizmoAxis = 'rotY';
+    this.gizmoGroup.add(rotMesh);
+    this.gizmoHandles.push({ name: 'rotY', mesh: rotMesh, mat: rotMat, origColor: 0xeab308, highlightColor: 0xfef08a });
+
+    this.scene.add(this.gizmoGroup);
+  }
+
+  private raycastGizmo(): 'x' | 'y' | 'z' | 'rotY' | null {
+    if (!this.gizmoGroup.visible) return null;
+    this.raycaster.setFromCamera(this.mouse, this.camera);
+
+    const hitObjects: THREE.Object3D[] = [];
+    for (const h of this.gizmoHandles) {
+      if (h.mesh instanceof THREE.Group) {
+        hitObjects.push(...h.mesh.children);
+      } else {
+        hitObjects.push(h.mesh);
+      }
+    }
+
+    const intersects = this.raycaster.intersectObjects(hitObjects, true);
+    if (intersects.length > 0) {
+      let cur: THREE.Object3D | null = intersects[0].object;
+      while (cur && cur !== this.gizmoGroup) {
+        if ((cur as any).gizmoAxis) {
+          return (cur as any).gizmoAxis as 'x' | 'y' | 'z' | 'rotY';
+        }
+        cur = cur.parent;
+      }
+    }
+    return null;
+  }
+
+  private updateGizmoHoverColors() {
+    for (const h of this.gizmoHandles) {
+      if (h.name === this.hoveredGizmoAxis || h.name === this.activeGizmoAxis) {
+        h.mat.color.setHex(h.highlightColor);
+      } else {
+        h.mat.color.setHex(h.origColor);
+      }
+    }
+  }
+
   // Sync piece mesh from server definition
   public syncPiece(data: TabletopPieceData) {
     let mesh = this.pieceMeshes.get(data.id);
 
-    // If deck card count changed, recreate mesh so its thickness and label update!
+    // If deck card count changed, dynamically scale the 3D model height!
     if (mesh && data.type === 'card_deck') {
       const oldPiece = (mesh as any).pieceData as TabletopPieceData | undefined;
-      const oldCount = oldPiece?.metadata?.cards?.length || oldPiece?.value;
-      const newCount = data.metadata?.cards?.length || data.value;
+      const oldCount = oldPiece?.metadata?.cards?.length ?? oldPiece?.value;
+      const newCount = data.metadata?.cards?.length ?? data.value;
       if (oldCount !== newCount) {
-        this.scene.remove(mesh);
-        this.pieceMeshes.delete(data.id);
-        mesh = undefined;
+        (mesh as any).pieceData = data;
+        this.scaleDeckModelHeight(data.id, newCount);
       }
     }
 
@@ -829,83 +946,105 @@ export class TabletopRenderer {
       case 'card_deck': {
         const w = data.dimensions?.x || 1.15;
         const count = data.metadata?.cards?.length || data.value || 52;
-        // Dynamic realistic card deck thickness based on card count (2 cards is ~0.015, NOT thick like a 100-card block!)
-        const h = calculateDeckHeight(count);
+        // Dynamic realistic card deck thickness based on card count in metadata
+        const h = this.getDeckVisualHeight(data);
         const d = data.dimensions?.z || 1.65;
         const geo = new THREE.BoxGeometry(w, h, d);
 
-        // Top Canvas: Card Back + Card Count
-        const topCanvas = document.createElement('canvas');
-        topCanvas.width = 256;
-        topCanvas.height = 360;
-        const tctx = topCanvas.getContext('2d')!;
+        const isStackFaceUp = data.metadata?.isFaceUp !== false;
+        const topCardLabel = data.metadata?.topCard || (data.label && !data.label.includes('CARDS') ? data.label : undefined) || 'A♠';
 
-        tctx.fillStyle = data.color || '#1e3a8a';
-        tctx.fillRect(0, 0, 256, 360);
-        tctx.strokeStyle = '#f8fafc';
-        tctx.lineWidth = 10;
-        tctx.strokeRect(10, 10, 236, 340);
+        // 1. Create Face Canvas (Face-up card appearance)
+        const faceCanvas = document.createElement('canvas');
+        faceCanvas.width = 256;
+        faceCanvas.height = 360;
+        const fctx = faceCanvas.getContext('2d')!;
+        fctx.fillStyle = '#ffffff';
+        fctx.fillRect(0, 0, 256, 360);
+        fctx.strokeStyle = '#e2e8f0';
+        fctx.lineWidth = 4;
+        fctx.strokeRect(6, 6, 244, 348);
 
-        tctx.fillStyle = '#ffffff18';
+        const isRed = topCardLabel.includes('♥') || topCardLabel.includes('♦') || data.secondaryColor === '#dc2626';
+        fctx.fillStyle = isRed ? '#dc2626' : '#0f172a';
+        fctx.font = 'bold 36px sans-serif';
+        fctx.textAlign = 'left';
+        fctx.fillText(topCardLabel, 18, 48);
+
+        fctx.textAlign = 'right';
+        fctx.fillText(topCardLabel, 238, 336);
+
+        fctx.font = '72px sans-serif';
+        fctx.textAlign = 'center';
+        fctx.textBaseline = 'middle';
+        fctx.fillText(topCardLabel.slice(-1) || '♠', 128, 180);
+
+        // Discreet badge on face showing number of stacked cards
+        fctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
+        fctx.beginPath();
+        fctx.roundRect(162, 16, 78, 34, 6);
+        fctx.fill();
+        fctx.strokeStyle = isRed ? '#dc2626' : '#38bdf8';
+        fctx.lineWidth = 1.8;
+        fctx.stroke();
+
+        fctx.fillStyle = '#ffffff';
+        fctx.font = 'bold 15px monospace';
+        fctx.textAlign = 'center';
+        fctx.textBaseline = 'middle';
+        fctx.fillText(`🎴 ${count}`, 201, 33);
+
+        const faceTex = new THREE.CanvasTexture(faceCanvas);
+
+        // 2. Create Back Canvas (Card Back pattern)
+        const backCanvas = document.createElement('canvas');
+        backCanvas.width = 256;
+        backCanvas.height = 360;
+        const bctx = backCanvas.getContext('2d')!;
+        bctx.fillStyle = data.color || '#1e3a8a';
+        bctx.fillRect(0, 0, 256, 360);
+        bctx.strokeStyle = '#f8fafc';
+        bctx.lineWidth = 10;
+        bctx.strokeRect(10, 10, 236, 340);
+        bctx.fillStyle = '#ffffff18';
         for (let i = 0; i < 6; i++) {
-          tctx.strokeRect(20 + i * 12, 20 + i * 16, 216 - i * 24, 320 - i * 32);
+          bctx.strokeRect(20 + i * 12, 20 + i * 16, 216 - i * 24, 320 - i * 32);
         }
 
-        // Card count badge: sleek and scaled to deck size!
-        if (count === 2) {
-          // 2 cards: discreet corner badge so it looks like authentic playing cards!
-          tctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-          tctx.beginPath();
-          tctx.roundRect(165, 20, 70, 38, 8);
-          tctx.fill();
-          tctx.strokeStyle = '#f59e0b';
-          tctx.lineWidth = 2.5;
-          tctx.stroke();
-
-          tctx.fillStyle = '#ffffff';
-          tctx.font = 'bold 20px monospace';
-          tctx.textAlign = 'center';
-          tctx.textBaseline = 'middle';
-          tctx.fillText(`2 🎴`, 200, 39);
-        } else if (count <= 6) {
-          // Small stack (3-6 cards): elegant compact badge
-          tctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-          tctx.beginPath();
-          tctx.roundRect(150, 20, 85, 40, 8);
-          tctx.fill();
-          tctx.strokeStyle = '#f59e0b';
-          tctx.lineWidth = 2.5;
-          tctx.stroke();
-
-          tctx.fillStyle = '#ffffff';
-          tctx.font = 'bold 18px monospace';
-          tctx.textAlign = 'center';
-          tctx.textBaseline = 'middle';
-          tctx.fillText(`${count} CARDS`, 192, 40);
+        // Back Badge
+        if (count <= 4) {
+          bctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+          bctx.beginPath();
+          bctx.roundRect(165, 20, 70, 38, 8);
+          bctx.fill();
+          bctx.strokeStyle = '#f59e0b';
+          bctx.lineWidth = 2.5;
+          bctx.stroke();
+          bctx.fillStyle = '#ffffff';
+          bctx.font = 'bold 20px monospace';
+          bctx.textAlign = 'center';
+          bctx.textBaseline = 'middle';
+          bctx.fillText(`${count} 🎴`, 200, 39);
         } else {
-          // Larger deck: centered counter
-          tctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
-          tctx.beginPath();
-          tctx.roundRect(46, 130, 164, 96, 14);
-          tctx.fill();
-          tctx.strokeStyle = '#f59e0b';
-          tctx.lineWidth = 3.5;
-          tctx.stroke();
-
-          tctx.fillStyle = '#f8fafc';
-          tctx.font = 'bold 42px monospace';
-          tctx.textAlign = 'center';
-          tctx.textBaseline = 'middle';
-          tctx.fillText(`${count}`, 128, 166);
-
-          tctx.font = 'bold 18px sans-serif';
-          tctx.fillStyle = '#f59e0b';
-          tctx.fillText('CARDS', 128, 202);
+          bctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+          bctx.beginPath();
+          bctx.roundRect(46, 130, 164, 96, 14);
+          bctx.fill();
+          bctx.strokeStyle = '#f59e0b';
+          bctx.lineWidth = 3.5;
+          bctx.stroke();
+          bctx.fillStyle = '#f8fafc';
+          bctx.font = 'bold 42px monospace';
+          bctx.textAlign = 'center';
+          bctx.textBaseline = 'middle';
+          bctx.fillText(`${count}`, 128, 166);
+          bctx.font = 'bold 18px sans-serif';
+          bctx.fillStyle = '#f59e0b';
+          bctx.fillText('CARDS', 128, 202);
         }
+        const backTex = new THREE.CanvasTexture(backCanvas);
 
-        const topTex = new THREE.CanvasTexture(topCanvas);
-
-        // Sides Canvas (proportional to real card layers)
+        // 3. Sides Canvas (proportional to real card layers)
         const sideCanvas = document.createElement('canvas');
         sideCanvas.width = 128;
         sideCanvas.height = 128;
@@ -938,8 +1077,10 @@ export class TabletopRenderer {
         sideTex.wrapT = THREE.RepeatWrapping;
 
         const sideMat = new THREE.MeshStandardMaterial({ map: sideTex, roughness: 0.6 });
-        const topMat = new THREE.MeshStandardMaterial({ map: topTex, roughness: 0.3 });
-        const bottomMat = new THREE.MeshStandardMaterial({ map: topTex, roughness: 0.4 });
+        // If stack is face up, top (+Y) shows the face-up card and bottom shows back; if face down, top shows back!
+        const isFaceUpDeck = data.metadata?.isFaceUp === true || isStackFaceUp;
+        const topMat = new THREE.MeshStandardMaterial({ map: isFaceUpDeck ? faceTex : backTex, roughness: 0.3 });
+        const bottomMat = new THREE.MeshStandardMaterial({ map: isFaceUpDeck ? backTex : faceTex, roughness: 0.4 });
 
         const deckMesh = new THREE.Mesh(geo, [sideMat, sideMat, topMat, bottomMat, sideMat, sideMat]);
         deckMesh.castShadow = true;
@@ -1010,25 +1151,214 @@ export class TabletopRenderer {
 
       case 'pawn':
       case 'chess_piece': {
-        const pawnMat = new THREE.MeshStandardMaterial({ color: baseColor, roughness: 0.35 });
-        const baseGeo = new THREE.CylinderGeometry(0.3, 0.35, 0.2, 16);
-        const stemGeo = new THREE.CylinderGeometry(0.16, 0.25, 0.65, 16);
-        const headGeo = new THREE.SphereGeometry(0.22, 16, 16);
+        const isWhite = baseColor === '#f8fafc' || data.metadata?.side === 'white' || !data.color?.includes('#1');
+        const role = (data.metadata?.role || data.name || data.label || '').toLowerCase();
 
-        const base = new THREE.Mesh(baseGeo, pawnMat);
-        base.position.y = 0.1;
+        const roleH = role.includes('king')
+          ? 1.35
+          : role.includes('queen')
+          ? 1.25
+          : role.includes('bishop')
+          ? 1.15
+          : role.includes('knight')
+          ? 1.10
+          : role.includes('rook')
+          ? 1.05
+          : 0.95;
+
+        const totalH = data.dimensions?.y || roleH;
+        const halfH = totalH / 2;
+
+        // Staunton piece materials
+        const pieceMat = new THREE.MeshStandardMaterial({
+          color: isWhite ? 0xf8fafc : 0x1e293b,
+          roughness: isWhite ? 0.3 : 0.35,
+          metalness: 0.05,
+        });
+
+        const feltMat = new THREE.MeshStandardMaterial({
+          color: 0x15803d, // tournament green felt pad on bottom
+          roughness: 0.9,
+        });
+
+        // 1. Felt pad at the very bottom (exactly touches board at y = -halfH)
+        const feltGeo = new THREE.CylinderGeometry(0.32, 0.32, 0.015, 24);
+        const felt = new THREE.Mesh(feltGeo, feltMat);
+        felt.position.y = -halfH + 0.0075;
+        group.add(felt);
+
+        // 2. Base pedestal (bottom is at -halfH, resting flush on the board)
+        const baseHeight = 0.18;
+        const baseGeo = new THREE.CylinderGeometry(0.30, 0.34, baseHeight, 24);
+        const base = new THREE.Mesh(baseGeo, pieceMat);
+        base.position.y = -halfH + baseHeight / 2;
         base.castShadow = true;
+        base.receiveShadow = true;
         group.add(base);
 
-        const stem = new THREE.Mesh(stemGeo, pawnMat);
-        stem.position.y = 0.5;
-        stem.castShadow = true;
-        group.add(stem);
+        // Base ring trim
+        const ringGeo = new THREE.CylinderGeometry(0.26, 0.31, 0.06, 24);
+        const ring = new THREE.Mesh(ringGeo, pieceMat);
+        ring.position.y = -halfH + baseHeight + 0.03;
+        ring.castShadow = true;
+        group.add(ring);
 
-        const head = new THREE.Mesh(headGeo, pawnMat);
-        head.position.y = 0.95;
-        head.castShadow = true;
-        group.add(head);
+        const currentY = -halfH + baseHeight + 0.06;
+
+        if (role.includes('king')) {
+          // King: Tallest piece with regal cross finial
+          const stemH = 0.58;
+          const stemGeo = new THREE.CylinderGeometry(0.18, 0.26, stemH, 20);
+          const stem = new THREE.Mesh(stemGeo, pieceMat);
+          stem.position.y = currentY + stemH / 2;
+          stem.castShadow = true;
+          group.add(stem);
+
+          // Crown collar
+          const collarGeo = new THREE.CylinderGeometry(0.28, 0.22, 0.08, 20);
+          const collar = new THREE.Mesh(collarGeo, pieceMat);
+          collar.position.y = currentY + stemH + 0.04;
+          collar.castShadow = true;
+          group.add(collar);
+
+          // Head dome
+          const domeGeo = new THREE.CylinderGeometry(0.24, 0.26, 0.22, 20);
+          const dome = new THREE.Mesh(domeGeo, pieceMat);
+          dome.position.y = currentY + stemH + 0.08 + 0.11;
+          dome.castShadow = true;
+          group.add(dome);
+
+          // Cross finial on top
+          const crossVGeo = new THREE.BoxGeometry(0.06, 0.20, 0.06);
+          const crossV = new THREE.Mesh(crossVGeo, pieceMat);
+          crossV.position.y = currentY + stemH + 0.08 + 0.22 + 0.10;
+          crossV.castShadow = true;
+          group.add(crossV);
+
+          const crossHGeo = new THREE.BoxGeometry(0.18, 0.06, 0.06);
+          const crossH = new THREE.Mesh(crossHGeo, pieceMat);
+          crossH.position.y = currentY + stemH + 0.08 + 0.22 + 0.12;
+          crossH.castShadow = true;
+          group.add(crossH);
+        } else if (role.includes('queen')) {
+          // Queen: Coronet crown with royal ball finial
+          const stemH = 0.54;
+          const stemGeo = new THREE.CylinderGeometry(0.18, 0.26, stemH, 20);
+          const stem = new THREE.Mesh(stemGeo, pieceMat);
+          stem.position.y = currentY + stemH / 2;
+          stem.castShadow = true;
+          group.add(stem);
+
+          // Crown flare
+          const crownGeo = new THREE.CylinderGeometry(0.29, 0.20, 0.24, 20);
+          const crown = new THREE.Mesh(crownGeo, pieceMat);
+          crown.position.y = currentY + stemH + 0.12;
+          crown.castShadow = true;
+          group.add(crown);
+
+          // Ball finial
+          const ballGeo = new THREE.SphereGeometry(0.10, 16, 16);
+          const ball = new THREE.Mesh(ballGeo, pieceMat);
+          ball.position.y = currentY + stemH + 0.24 + 0.08;
+          ball.castShadow = true;
+          group.add(ball);
+        } else if (role.includes('bishop')) {
+          // Bishop: Slender stem with mitre pointed oval
+          const stemH = 0.48;
+          const stemGeo = new THREE.CylinderGeometry(0.16, 0.24, stemH, 20);
+          const stem = new THREE.Mesh(stemGeo, pieceMat);
+          stem.position.y = currentY + stemH / 2;
+          stem.castShadow = true;
+          group.add(stem);
+
+          const mitreGeo = new THREE.SphereGeometry(0.22, 16, 16);
+          mitreGeo.scale(0.85, 1.3, 0.85);
+          const mitre = new THREE.Mesh(mitreGeo, pieceMat);
+          mitre.position.y = currentY + stemH + 0.22;
+          mitre.castShadow = true;
+          group.add(mitre);
+
+          const ballGeo = new THREE.SphereGeometry(0.06, 12, 12);
+          const ball = new THREE.Mesh(ballGeo, pieceMat);
+          ball.position.y = currentY + stemH + 0.48;
+          ball.castShadow = true;
+          group.add(ball);
+        } else if (role.includes('knight')) {
+          // Knight: Arched horse neck, snout and mane
+          const stemH = 0.28;
+          const stemGeo = new THREE.CylinderGeometry(0.22, 0.26, stemH, 20);
+          const stem = new THREE.Mesh(stemGeo, pieceMat);
+          stem.position.y = currentY + stemH / 2;
+          stem.castShadow = true;
+          group.add(stem);
+
+          // Horse head and neck
+          const horseNeckGeo = new THREE.BoxGeometry(0.24, 0.42, 0.36);
+          const horseNeck = new THREE.Mesh(horseNeckGeo, pieceMat);
+          horseNeck.position.set(0, currentY + stemH + 0.18, 0.04);
+          horseNeck.rotation.x = -0.22;
+          horseNeck.castShadow = true;
+          group.add(horseNeck);
+
+          // Horse muzzle / snout
+          const snoutGeo = new THREE.BoxGeometry(0.20, 0.20, 0.28);
+          const snout = new THREE.Mesh(snoutGeo, pieceMat);
+          snout.position.set(0, currentY + stemH + 0.24, 0.24);
+          snout.rotation.x = 0.18;
+          snout.castShadow = true;
+          group.add(snout);
+
+          // Horse ears
+          const earGeo = new THREE.ConeGeometry(0.06, 0.14, 8);
+          const ear1 = new THREE.Mesh(earGeo, pieceMat);
+          ear1.position.set(-0.08, currentY + stemH + 0.44, -0.06);
+          group.add(ear1);
+          const ear2 = new THREE.Mesh(earGeo, pieceMat);
+          ear2.position.set(0.08, currentY + stemH + 0.44, -0.06);
+          group.add(ear2);
+        } else if (role.includes('rook')) {
+          // Rook: Castle battlement / parapet tower
+          const towerH = 0.52;
+          const towerGeo = new THREE.CylinderGeometry(0.24, 0.27, towerH, 20);
+          const tower = new THREE.Mesh(towerGeo, pieceMat);
+          tower.position.y = currentY + towerH / 2;
+          tower.castShadow = true;
+          group.add(tower);
+
+          // Parapet rim
+          const parapetGeo = new THREE.CylinderGeometry(0.30, 0.27, 0.20, 16);
+          const parapet = new THREE.Mesh(parapetGeo, pieceMat);
+          parapet.position.y = currentY + towerH + 0.10;
+          parapet.castShadow = true;
+          group.add(parapet);
+
+          // Crenel cutouts (inner depression)
+          const recessGeo = new THREE.CylinderGeometry(0.18, 0.18, 0.08, 16);
+          const recessMat = new THREE.MeshStandardMaterial({ color: isWhite ? 0xe2e8f0 : 0x0f172a, roughness: 0.6 });
+          const recess = new THREE.Mesh(recessGeo, recessMat);
+          recess.position.y = currentY + towerH + 0.17;
+          group.add(recess);
+        } else {
+          // Pawn: Classic Staunton pawn
+          const stemH = 0.38;
+          const stemGeo = new THREE.CylinderGeometry(0.14, 0.24, stemH, 20);
+          const stem = new THREE.Mesh(stemGeo, pieceMat);
+          stem.position.y = currentY + stemH / 2;
+          stem.castShadow = true;
+          group.add(stem);
+
+          const collarGeo = new THREE.CylinderGeometry(0.22, 0.18, 0.06, 20);
+          const collar = new THREE.Mesh(collarGeo, pieceMat);
+          collar.position.y = currentY + stemH + 0.03;
+          collar.castShadow = true;
+          group.add(collar);
+
+          const headGeo = new THREE.SphereGeometry(0.19, 20, 20);
+          const head = new THREE.Mesh(headGeo, pieceMat);
+          head.position.y = currentY + stemH + 0.06 + 0.18;
+          head.castShadow = true;
+          group.add(head);
+        }
         break;
       }
 
@@ -1149,6 +1479,95 @@ export class TabletopRenderer {
         screenMesh.rotation.x = -Math.PI / 2;
         screenMesh.position.y = h / 2 + 0.005;
         group.add(screenMesh);
+        break;
+      }
+
+      case 'board': {
+        const w = data.dimensions?.x || 9.8;
+        const h = data.dimensions?.y || 0.08;
+        const d = data.dimensions?.z || 9.8;
+
+        // Create high-res 8x8 tournament chessboard canvas texture
+        const boardCanvas = document.createElement('canvas');
+        boardCanvas.width = 1024;
+        boardCanvas.height = 1024;
+        const bctx = boardCanvas.getContext('2d')!;
+
+        // 1. Rich dark walnut border / frame
+        bctx.fillStyle = '#26150b';
+        bctx.fillRect(0, 0, 1024, 1024);
+
+        // Frame inner bevel
+        bctx.strokeStyle = '#c29b68';
+        bctx.lineWidth = 4;
+        bctx.strokeRect(60, 60, 904, 904);
+
+        bctx.strokeStyle = '#613b1e';
+        bctx.lineWidth = 8;
+        bctx.strokeRect(68, 68, 888, 888);
+
+        // 2. 8x8 Chessboard Grid
+        const gridX = 80;
+        const gridY = 80;
+        const gridSize = 864;
+        const sqSize = gridSize / 8;
+
+        const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+        const ranks = ['8', '7', '6', '5', '4', '3', '2', '1'];
+
+        for (let row = 0; row < 8; row++) {
+          for (let col = 0; col < 8; col++) {
+            const isLight = (row + col) % 2 === 0;
+            bctx.fillStyle = isLight ? '#f0d9b5' : '#b58863';
+            bctx.fillRect(gridX + col * sqSize, gridY + row * sqSize, sqSize, sqSize);
+          }
+        }
+
+        // 3. Algebraic Coordinate Notation (Rank 1-8 & File a-h)
+        bctx.fillStyle = '#e2d4be';
+        bctx.font = 'bold 24px serif';
+        bctx.textAlign = 'center';
+        bctx.textBaseline = 'middle';
+
+        // Files along top and bottom
+        for (let i = 0; i < 8; i++) {
+          const cx = gridX + i * sqSize + sqSize / 2;
+          bctx.fillText(files[i], cx, 40);
+          bctx.fillText(files[i], cx, 984);
+        }
+
+        // Ranks along left and right
+        for (let i = 0; i < 8; i++) {
+          const cy = gridY + i * sqSize + sqSize / 2;
+          bctx.fillText(ranks[i], 38, cy);
+          bctx.fillText(ranks[i], 986, cy);
+        }
+
+        const topTex = new THREE.CanvasTexture(boardCanvas);
+        topTex.generateMipmaps = true;
+
+        const woodMat = new THREE.MeshStandardMaterial({
+          color: 0x2b180d,
+          roughness: 0.45,
+          metalness: 0.05,
+        });
+
+        const topMat = new THREE.MeshStandardMaterial({
+          map: topTex,
+          roughness: 0.25,
+          metalness: 0.05,
+        });
+
+        const feltMat = new THREE.MeshStandardMaterial({
+          color: 0x164e32,
+          roughness: 0.9,
+        });
+
+        const boardGeo = new THREE.BoxGeometry(w, h, d);
+        const boardMesh = new THREE.Mesh(boardGeo, [woodMat, woodMat, topMat, feltMat, woodMat, woodMat]);
+        boardMesh.castShadow = true;
+        boardMesh.receiveShadow = true;
+        group.add(boardMesh);
         break;
       }
 
@@ -1318,6 +1737,209 @@ export class TabletopRenderer {
     }
   }
 
+  /**
+   * Dynamically calculates the 3D model height (Y-axis) of a deck based on the number of cards
+   * in its metadata, ensuring a single card is thin (~0.008) and a deck of 52 cards is visually thick (~0.320).
+   */
+  public getDeckVisualHeight(
+    pieceOrCount?: TabletopPieceData | { metadata?: { cards?: string[]; count?: number; cardsCount?: number }; value?: number } | number | null
+  ): number {
+    return calculateDeckHeightFromMetadata(pieceOrCount);
+  }
+
+  /**
+   * Dynamically scales the 3D model height (Y-axis) of a deck based on the number of cards in its metadata.
+   * Updates the BoxGeometry height, textures, badge, and piece dimensions in real time.
+   *
+   * @param deckIdOrPiece - Piece ID or TabletopPieceData of the deck to scale
+   * @param overrideCount - Optional manual card count override
+   * @returns The updated 3D model height on the Y-axis
+   */
+  public scaleDeckModelHeight(
+    deckIdOrPiece: string | TabletopPieceData,
+    overrideCount?: number
+  ): number {
+    const pieceId = typeof deckIdOrPiece === 'string' ? deckIdOrPiece : deckIdOrPiece.id;
+    const mesh = this.pieceMeshes.get(pieceId);
+    const pieceData =
+      ((mesh as any)?.pieceData as TabletopPieceData | undefined) ||
+      (typeof deckIdOrPiece === 'object' ? deckIdOrPiece : undefined);
+
+    let count = overrideCount;
+    if (count === undefined && pieceData) {
+      if (Array.isArray(pieceData.metadata?.cards)) {
+        count = pieceData.metadata.cards.length;
+      } else if (typeof pieceData.metadata?.count === 'number') {
+        count = pieceData.metadata.count;
+      } else if (typeof pieceData.metadata?.cardsCount === 'number') {
+        count = pieceData.metadata.cardsCount;
+      } else if (typeof pieceData.value === 'number') {
+        count = pieceData.value;
+      }
+    }
+    if (count === undefined) count = 52;
+
+    const targetHeight = this.getDeckVisualHeight(count);
+
+    if (pieceData) {
+      if (!pieceData.dimensions) {
+        pieceData.dimensions = { x: 1.15, y: targetHeight, z: 1.65 };
+      } else {
+        pieceData.dimensions.y = targetHeight;
+      }
+      pieceData.value = count;
+      if (!pieceData.label || pieceData.label.includes('CARDS')) {
+        pieceData.label = `${count} CARDS`;
+      }
+    }
+
+    if (mesh) {
+      let boxMesh: THREE.Mesh | null = null;
+      if (mesh instanceof THREE.Mesh) {
+        boxMesh = mesh;
+      } else {
+        mesh.traverse((child) => {
+          if (!boxMesh && child instanceof THREE.Mesh && child.geometry instanceof THREE.BoxGeometry) {
+            boxMesh = child;
+          }
+        });
+      }
+
+      if (boxMesh && boxMesh.geometry instanceof THREE.BoxGeometry) {
+        const w = pieceData?.dimensions?.x || 1.15;
+        const d = pieceData?.dimensions?.z || 1.65;
+
+        // Dispose previous BoxGeometry and assign new dynamically scaled BoxGeometry
+        boxMesh.geometry.dispose();
+        boxMesh.geometry = new THREE.BoxGeometry(w, targetHeight, d);
+
+        // Update top canvas and textures
+        const topCanvas = document.createElement('canvas');
+        topCanvas.width = 256;
+        topCanvas.height = 360;
+        const tctx = topCanvas.getContext('2d')!;
+
+        tctx.fillStyle = pieceData?.color || '#1e3a8a';
+        tctx.fillRect(0, 0, 256, 360);
+        tctx.strokeStyle = '#f8fafc';
+        tctx.lineWidth = 10;
+        tctx.strokeRect(10, 10, 236, 340);
+
+        tctx.fillStyle = '#ffffff18';
+        for (let i = 0; i < 6; i++) {
+          tctx.strokeRect(20 + i * 12, 20 + i * 16, 216 - i * 24, 320 - i * 32);
+        }
+
+        if (count <= 1) {
+          tctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+          tctx.beginPath();
+          tctx.roundRect(165, 20, 70, 38, 8);
+          tctx.fill();
+          tctx.strokeStyle = '#f59e0b';
+          tctx.lineWidth = 2.5;
+          tctx.stroke();
+
+          tctx.fillStyle = '#ffffff';
+          tctx.font = 'bold 20px monospace';
+          tctx.textAlign = 'center';
+          tctx.textBaseline = 'middle';
+          tctx.fillText(`1 🎴`, 200, 39);
+        } else if (count === 2) {
+          tctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+          tctx.beginPath();
+          tctx.roundRect(165, 20, 70, 38, 8);
+          tctx.fill();
+          tctx.strokeStyle = '#f59e0b';
+          tctx.lineWidth = 2.5;
+          tctx.stroke();
+
+          tctx.fillStyle = '#ffffff';
+          tctx.font = 'bold 20px monospace';
+          tctx.textAlign = 'center';
+          tctx.textBaseline = 'middle';
+          tctx.fillText(`2 🎴`, 200, 39);
+        } else if (count <= 6) {
+          tctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+          tctx.beginPath();
+          tctx.roundRect(150, 20, 85, 40, 8);
+          tctx.fill();
+          tctx.strokeStyle = '#f59e0b';
+          tctx.lineWidth = 2.5;
+          tctx.stroke();
+
+          tctx.fillStyle = '#ffffff';
+          tctx.font = 'bold 18px monospace';
+          tctx.textAlign = 'center';
+          tctx.textBaseline = 'middle';
+          tctx.fillText(`${count} CARDS`, 192, 40);
+        } else {
+          tctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+          tctx.beginPath();
+          tctx.roundRect(46, 130, 164, 96, 14);
+          tctx.fill();
+          tctx.strokeStyle = '#f59e0b';
+          tctx.lineWidth = 3.5;
+          tctx.stroke();
+
+          tctx.fillStyle = '#f8fafc';
+          tctx.font = 'bold 42px monospace';
+          tctx.textAlign = 'center';
+          tctx.textBaseline = 'middle';
+          tctx.fillText(`${count}`, 128, 166);
+
+          tctx.font = 'bold 18px sans-serif';
+          tctx.fillStyle = '#f59e0b';
+          tctx.fillText('CARDS', 128, 202);
+        }
+
+        const sideCanvas = document.createElement('canvas');
+        sideCanvas.width = 128;
+        sideCanvas.height = 128;
+        const sctx = sideCanvas.getContext('2d')!;
+        sctx.fillStyle = '#f8fafc';
+        sctx.fillRect(0, 0, 128, 128);
+
+        if (count <= 1) {
+          // Single card: plain ivory/white edge
+        } else if (count === 2) {
+          sctx.fillStyle = '#94a3b8';
+          sctx.fillRect(0, 63, 128, 2);
+        } else if (count <= 6) {
+          sctx.fillStyle = '#94a3b8';
+          const step = 128 / count;
+          for (let i = 1; i < count; i++) {
+            sctx.fillRect(0, Math.round(i * step), 128, 1.5);
+          }
+        } else {
+          sctx.fillStyle = '#cbd5e1';
+          const visibleLines = Math.min(count, 32);
+          const step = 128 / visibleLines;
+          for (let i = 1; i < visibleLines; i++) {
+            sctx.fillRect(0, Math.round(i * step), 128, 1.2);
+          }
+        }
+
+        const topTex = new THREE.CanvasTexture(topCanvas);
+        const sideTex = new THREE.CanvasTexture(sideCanvas);
+        sideTex.wrapS = THREE.RepeatWrapping;
+        sideTex.wrapT = THREE.RepeatWrapping;
+
+        if (Array.isArray(boxMesh.material)) {
+          boxMesh.material.forEach((mat) => {
+            if ((mat as any).map) (mat as any).map.dispose();
+            mat.dispose();
+          });
+          const sideMat = new THREE.MeshStandardMaterial({ map: sideTex, roughness: 0.6 });
+          const topMat = new THREE.MeshStandardMaterial({ map: topTex, roughness: 0.3 });
+          const bottomMat = new THREE.MeshStandardMaterial({ map: topTex, roughness: 0.4 });
+          boxMesh.material = [sideMat, sideMat, topMat, bottomMat, sideMat, sideMat];
+        }
+      }
+    }
+
+    return targetHeight;
+  }
+
   // Calculate real piece 3D dimensions
   public getPieceDimensions(piece?: TabletopPieceData | null): Vector3D {
     if (!piece) return { x: 1.0, y: 0.1, z: 1.0 };
@@ -1325,8 +1947,7 @@ export class TabletopRenderer {
       case 'card':
         return { x: piece.dimensions?.x || 1.1, y: 0.008, z: piece.dimensions?.z || 1.6 };
       case 'card_deck': {
-        const count = piece.metadata?.cards?.length || piece.value || 52;
-        const deckH = calculateDeckHeight(count);
+        const deckH = this.getDeckVisualHeight(piece);
         return { x: piece.dimensions?.x || 1.15, y: deckH, z: piece.dimensions?.z || 1.65 };
       }
       case 'poker_chip':
@@ -1348,10 +1969,27 @@ export class TabletopRenderer {
         return piece.dimensions || { x: 0.6, y: 0.15, z: 1.3 };
       case 'block':
         return piece.dimensions || { x: 0.8, y: 0.8, z: 0.8 };
+      case 'board':
+        return piece.dimensions || { x: 9.8, y: 0.08, z: 9.8 };
       case 'pawn':
+        return piece.dimensions || { x: 0.6, y: 0.95, z: 0.6 };
       case 'meeple':
-      case 'chess_piece':
-        return piece.dimensions || { x: 0.65, y: 1.1, z: 0.65 };
+        return piece.dimensions || { x: 0.75, y: 0.8, z: 0.3 };
+      case 'chess_piece': {
+        const role = (piece.metadata?.role || piece.name || piece.label || '').toLowerCase();
+        const roleH = role.includes('king')
+          ? 1.35
+          : role.includes('queen')
+          ? 1.25
+          : role.includes('bishop')
+          ? 1.15
+          : role.includes('knight')
+          ? 1.10
+          : role.includes('rook')
+          ? 1.05
+          : 0.95;
+        return piece.dimensions || { x: 0.65, y: roleH, z: 0.65 };
+      }
       default:
         return piece.dimensions || { x: 1.0, y: 0.3, z: 1.0 };
     }
@@ -1622,6 +2260,43 @@ export class TabletopRenderer {
           return;
         }
 
+        // 3b. Transform Gizmo Tool Mode (F9)
+        if (this.currentTool === 'gizmo') {
+          const hitAxis = this.raycastGizmo();
+          if (hitAxis && this.gizmoTargetPieceId) {
+            this.activeGizmoAxis = hitAxis;
+            const targetMesh = this.pieceMeshes.get(this.gizmoTargetPieceId);
+            if (targetMesh) {
+              this.gizmoPieceStartPos.copy(targetMesh.position);
+              this.gizmoPieceStartRot.copy(targetMesh.quaternion);
+              this.gizmoDragStartScreen = { x: e.clientX, y: e.clientY };
+              const planeNormal = hitAxis === 'y'
+                ? new THREE.Vector3().subVectors(this.camera.position, this.gizmoGroup.position).setY(0).normalize()
+                : new THREE.Vector3(0, 1, 0);
+              this.gizmoDragPlane.setFromNormalAndCoplanarPoint(planeNormal, this.gizmoGroup.position);
+              this.raycaster.setFromCamera(this.mouse, this.camera);
+              this.raycaster.ray.intersectPlane(this.gizmoDragPlane, this.gizmoDragStartPoint);
+            }
+            dom.setPointerCapture(e.pointerId);
+            return;
+          }
+
+          // If clicked a piece, set it as gizmo target piece
+          const pieceHit = this.raycastPieces();
+          if (pieceHit) {
+            const pieceId = (pieceHit as any).tabletopId;
+            this.selectedPieceIds.clear();
+            this.selectedPieceIds.add(pieceId);
+            this.gizmoTargetPieceId = pieceId;
+            this.updateSelectionHighlights();
+            if (this.events.onSelectionChange) {
+              this.events.onSelectionChange([pieceId]);
+            }
+            dom.setPointerCapture(e.pointerId);
+            return;
+          }
+        }
+
         // 4. Default Grab Tool Mode & Selection
         const pieceHit = this.raycastPieces();
         if (pieceHit) {
@@ -1705,6 +2380,8 @@ export class TabletopRenderer {
           this.isBoxSelecting = true;
           this.boxSelectStart = { x: e.clientX, y: e.clientY };
           this.boxSelectCurrent = { x: e.clientX, y: e.clientY };
+          this.boxSelectInitialSelection = e.shiftKey ? new Set(this.selectedPieceIds) : new Set();
+          this.boxSelectAccumulated = new Set(this.boxSelectInitialSelection);
           if (this.events.onBoxSelectChange) {
             this.events.onBoxSelectChange({
               x1: e.clientX,
@@ -1766,18 +2443,23 @@ export class TabletopRenderer {
           this.events.onBoxSelectChange({ x1: minX, y1: minY, x2: maxX, y2: maxY, active: true });
         }
 
-        if (maxX - minX > 5 || maxY - minY > 5) {
+        if (maxX - minX > 4 || maxY - minY > 4) {
           const rect = dom.getBoundingClientRect();
+
           for (const [id, mesh] of this.pieceMeshes.entries()) {
             const screenPos = mesh.position.clone().project(this.camera);
             if (screenPos.z < 1) {
               const px = ((screenPos.x + 1) / 2) * rect.width + rect.left;
               const py = ((-screenPos.y + 1) / 2) * rect.height + rect.top;
               if (px >= minX && px <= maxX && py >= minY && py <= maxY) {
-                this.selectedPieceIds.add(id);
+                this.boxSelectAccumulated.add(id);
               }
             }
           }
+
+          // Items selected with the square rectangle do not get unselected when the selection rectangle is not on them anymore!
+          this.selectedPieceIds = new Set(this.boxSelectAccumulated);
+
           this.updateSelectionHighlights();
           if (this.events.onSelectionChange) {
             this.events.onSelectionChange(Array.from(this.selectedPieceIds));
@@ -1822,15 +2504,63 @@ export class TabletopRenderer {
         return;
       }
 
+      // Transform Gizmo Dragging (Translation & Rotation)
+      if (this.currentTool === 'gizmo' && this.activeGizmoAxis && this.gizmoTargetPieceId) {
+        const targetMesh = this.pieceMeshes.get(this.gizmoTargetPieceId);
+        if (targetMesh) {
+          this.raycaster.setFromCamera(this.mouse, this.camera);
+          const currentHit = new THREE.Vector3();
+          if (this.raycaster.ray.intersectPlane(this.gizmoDragPlane, currentHit)) {
+            const delta = currentHit.clone().sub(this.gizmoDragStartPoint);
+
+            if (this.activeGizmoAxis === 'x') {
+              const newX = this.gizmoPieceStartPos.x + delta.x;
+              targetMesh.position.x = newX;
+            } else if (this.activeGizmoAxis === 'z') {
+              const newZ = this.gizmoPieceStartPos.z + delta.z;
+              targetMesh.position.z = newZ;
+            } else if (this.activeGizmoAxis === 'y') {
+              const screenDeltaY = (this.gizmoDragStartScreen.y - e.clientY) * 0.035;
+              const newY = Math.max(this.currentTableConfig.height + 0.05, this.gizmoPieceStartPos.y + screenDeltaY);
+              targetMesh.position.y = newY;
+            } else if (this.activeGizmoAxis === 'rotY') {
+              const startAngle = Math.atan2(this.gizmoDragStartPoint.z - this.gizmoPieceStartPos.z, this.gizmoDragStartPoint.x - this.gizmoPieceStartPos.x);
+              const curAngle = Math.atan2(currentHit.z - this.gizmoPieceStartPos.z, currentHit.x - this.gizmoPieceStartPos.x);
+              const angleDelta = curAngle - startAngle;
+              const rotQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleDelta);
+              targetMesh.quaternion.copy(this.gizmoPieceStartRot).multiply(rotQuat);
+            }
+
+            this.gizmoGroup.position.copy(targetMesh.position);
+
+            if (this.events.onPieceDrag) {
+              this.events.onPieceDrag(this.gizmoTargetPieceId, {
+                x: targetMesh.position.x,
+                y: targetMesh.position.y,
+                z: targetMesh.position.z,
+              });
+            }
+          }
+        }
+        return;
+      }
+
+      // Transform Gizmo Hover Highlighting
+      if (this.currentTool === 'gizmo' && !this.activeGizmoAxis) {
+        const hitAxis = this.raycastGizmo();
+        if (hitAxis !== this.hoveredGizmoAxis) {
+          this.hoveredGizmoAxis = hitAxis;
+          this.updateGizmoHoverColors();
+        }
+        if (hitAxis) {
+          dom.style.cursor = 'move';
+        }
+      }
+
       // Dragging grabbed piece (and all multi-selected pieces!)
       if (this.grabbedPieceId) {
         this.raycaster.setFromCamera(this.mouse, this.camera);
         if (this.raycaster.ray.intersectPlane(this.dragPlane, this.dragPlaneIntersect)) {
-          const maxX = this.currentTableConfig.width / 2 + 1.5;
-          const maxZ = this.currentTableConfig.length / 2 + 1.5;
-          let clampedX = Math.max(-maxX, Math.min(maxX, this.dragPlaneIntersect.x));
-          let clampedZ = Math.max(-maxZ, Math.min(maxZ, this.dragPlaneIntersect.z));
-
           const mesh = this.pieceMeshes.get(this.grabbedPieceId);
           const draggedPiece = mesh ? ((mesh as any).pieceData as TabletopPieceData | undefined) : undefined;
           const draggedDims = this.getPieceDimensions(draggedPiece);
@@ -1838,6 +2568,14 @@ export class TabletopRenderer {
           const draggedHalfZ = (draggedDims.z || 1.0) / 2;
           const draggedRadius = Math.hypot(draggedHalfX, draggedHalfZ);
           const draggedHeight = draggedDims.y || 0.01;
+
+          // Constrain dragging strictly within table boundaries (cannot drag pieces outside the table)
+          const tableHalfW = this.currentTableConfig.width / 2;
+          const tableHalfL = this.currentTableConfig.length / 2;
+          const maxTableX = Math.max(0.1, tableHalfW - draggedHalfX);
+          const maxTableZ = Math.max(0.1, tableHalfL - draggedHalfZ);
+          let clampedX = Math.max(-maxTableX, Math.min(maxTableX, this.dragPlaneIntersect.x));
+          let clampedZ = Math.max(-maxTableZ, Math.min(maxTableZ, this.dragPlaneIntersect.z));
 
           const tableTopY = this.currentTableConfig.height;
           // Normal hovering height when dragging over empty table:
@@ -1896,6 +2634,10 @@ export class TabletopRenderer {
             targetElevationY = baseDragElevation;
           }
 
+          // Bound elevation within the invisible box ceiling
+          const maxElevationY = tableTopY + 3.6 - draggedHeight / 2;
+          targetElevationY = Math.min(maxElevationY, targetElevationY);
+
           // Magnetize and stack indicator when centered over a stackable candidate
           if (stackCandidate && stackCandidate.dist < (draggedHalfX + this.getPieceDimensions(stackCandidate.piece).x / 2) * 0.7) {
             // Magnetic centering assist
@@ -1924,11 +2666,22 @@ export class TabletopRenderer {
             { pieceId: this.grabbedPieceId, worldPos: { x: targetPos.x, y: targetPos.y, z: targetPos.z } },
           ];
 
-          // Move all other selected pieces maintaining relative offsets
+          // Move all other selected pieces maintaining relative offsets, keeping within table bounds
           for (const [otherId, offset] of this.multiDragOffsets.entries()) {
             const otherMesh = this.pieceMeshes.get(otherId);
             if (otherMesh) {
-              const otherPos = targetPos.clone().add(offset);
+              const otherPiece = (otherMesh as any).pieceData as TabletopPieceData | undefined;
+              const otherDims = this.getPieceDimensions(otherPiece);
+              const otherHalfX = (otherDims.x || 1.0) / 2;
+              const otherHalfZ = (otherDims.z || 1.0) / 2;
+              const otherMaxX = Math.max(0.1, tableHalfW - otherHalfX);
+              const otherMaxZ = Math.max(0.1, tableHalfL - otherHalfZ);
+
+              const otherX = Math.max(-otherMaxX, Math.min(otherMaxX, clampedX + offset.x));
+              const otherZ = Math.max(-otherMaxZ, Math.min(otherMaxZ, clampedZ + offset.z));
+              const otherY = Math.max(tableTopY + (otherDims.y || 0.01) / 2, Math.min(maxElevationY, targetPos.y + offset.y));
+
+              const otherPos = new THREE.Vector3(otherX, otherY, otherZ);
               otherMesh.position.copy(otherPos);
               multiUpdates.push({
                 pieceId: otherId,
@@ -2074,17 +2827,36 @@ export class TabletopRenderer {
         } catch (_) {}
       }
 
+      // Finish Gizmo drag
+      if (this.currentTool === 'gizmo' && this.activeGizmoAxis && this.gizmoTargetPieceId) {
+        const targetMesh = this.pieceMeshes.get(this.gizmoTargetPieceId);
+        if (targetMesh && this.events.onPieceRelease) {
+          this.events.onPieceRelease(this.gizmoTargetPieceId, { x: 0, y: 0, z: 0 });
+        }
+        this.activeGizmoAxis = null;
+        this.updateGizmoHoverColors();
+        try {
+          dom.releasePointerCapture(e.pointerId);
+        } catch (_) {}
+      }
+
       // Finish Grab Release (Single or Multi-piece)
       if (this.grabbedPieceId) {
         const releasedId = this.grabbedPieceId;
+        const clampedVel: Vector3D = {
+          x: Math.max(-8, Math.min(8, this.dragVelocity.x)),
+          y: Math.max(-2, Math.min(5, this.dragVelocity.y)),
+          z: Math.max(-8, Math.min(8, this.dragVelocity.z)),
+        };
+
         const releases: Array<{ pieceId: string; velocity: Vector3D }> = [
-          { pieceId: releasedId, velocity: { x: this.dragVelocity.x, y: this.dragVelocity.y, z: this.dragVelocity.z } },
+          { pieceId: releasedId, velocity: clampedVel },
         ];
 
         for (const otherId of this.multiDragOffsets.keys()) {
           releases.push({
             pieceId: otherId,
-            velocity: { x: this.dragVelocity.x, y: this.dragVelocity.y, z: this.dragVelocity.z },
+            velocity: clampedVel,
           });
         }
 
@@ -2095,11 +2867,7 @@ export class TabletopRenderer {
         } catch (_) {}
 
         if (this.events.onPieceRelease) {
-          this.events.onPieceRelease(releasedId, {
-            x: this.dragVelocity.x,
-            y: this.dragVelocity.y,
-            z: this.dragVelocity.z,
-          });
+          this.events.onPieceRelease(releasedId, clampedVel);
         }
         if (releases.length > 1 && this.events.onMultiPieceRelease) {
           this.events.onMultiPieceRelease(releases);
@@ -2178,12 +2946,38 @@ export class TabletopRenderer {
 
     for (const [id, mesh] of this.pieceMeshes.entries()) {
       if (id === this.grabbedPieceId) continue;
+      if (this.currentTool === 'gizmo' && this.activeGizmoAxis && id === this.gizmoTargetPieceId) continue;
 
       const target = this.pieceTargetTransforms.get(id);
       if (target) {
-        mesh.position.lerp(target.pos, 0.4);
-        mesh.quaternion.slerp(target.quat, 0.4);
+        const distSq = mesh.position.distanceToSquared(target.pos);
+        if (distSq > 0.00004) {
+          mesh.position.lerp(target.pos, 0.4);
+          mesh.quaternion.slerp(target.quat, 0.4);
+        }
       }
+    }
+
+    // 3D Transform Gizmo Viewport Alignment & Scaling (F9)
+    if (this.currentTool === 'gizmo') {
+      const activeId = this.gizmoTargetPieceId || Array.from(this.selectedPieceIds)[0];
+      if (activeId) {
+        this.gizmoTargetPieceId = activeId;
+        const targetMesh = this.pieceMeshes.get(activeId);
+        if (targetMesh) {
+          this.gizmoGroup.position.copy(targetMesh.position);
+          const camDist = this.camera.position.distanceTo(targetMesh.position);
+          const s = Math.max(0.5, Math.min(2.5, camDist * 0.065));
+          this.gizmoGroup.scale.set(s, s, s);
+          this.gizmoGroup.visible = true;
+        } else {
+          this.gizmoGroup.visible = false;
+        }
+      } else {
+        this.gizmoGroup.visible = false;
+      }
+    } else {
+      this.gizmoGroup.visible = false;
     }
 
     const now = Date.now();
@@ -2207,7 +3001,70 @@ export class TabletopRenderer {
     this.renderer.render(this.scene, this.camera);
   }
 
-  // TTS Selection & Multi-Selection Highlight Management
+  // Tabletopia Light Blue Selection Ring Texture Generator
+  private getTabletopiaRingTexture(): THREE.CanvasTexture {
+    if (this.tabletopiaRingTexture) return this.tabletopiaRingTexture;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 256;
+    const ctx = canvas.getContext('2d')!;
+
+    const cx = 128;
+    const cy = 128;
+    const r = 96;
+
+    // 1. Soft inner translucent light-blue fill (Tabletopia glow)
+    const innerGrad = ctx.createRadialGradient(cx, cy, 10, cx, cy, r);
+    innerGrad.addColorStop(0, 'rgba(56, 189, 248, 0.22)');
+    innerGrad.addColorStop(0.7, 'rgba(56, 189, 248, 0.12)');
+    innerGrad.addColorStop(1, 'rgba(56, 189, 248, 0.0)');
+    ctx.fillStyle = innerGrad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 2. Outer soft bloom halo
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
+    ctx.lineWidth = 14;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 3. Crisp vibrant light blue neon ring
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 4. Inner bright cyan rim
+    ctx.strokeStyle = '#bae6fd';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r - 1.5, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 5. Tabletopia signature 4 cardinal tick accents (at 0, 90, 180, 270 deg)
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 4;
+    const angles = [0, Math.PI / 2, Math.PI, (Math.PI * 3) / 2];
+    for (const a of angles) {
+      const x1 = cx + Math.cos(a) * (r - 12);
+      const y1 = cy + Math.sin(a) * (r - 12);
+      const x2 = cx + Math.cos(a) * (r + 12);
+      const y2 = cy + Math.sin(a) * (r + 12);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    }
+
+    this.tabletopiaRingTexture = new THREE.CanvasTexture(canvas);
+    return this.tabletopiaRingTexture;
+  }
+
+  // Tabletopia Selection & Multi-Selection Highlight Management (Luminous Light Blue Ring)
   public updateSelectionHighlights() {
     // Remove highlights for unselected pieces
     for (const [id, highlightMesh] of this.selectionHighlightMeshes.entries()) {
@@ -2218,24 +3075,27 @@ export class TabletopRenderer {
       }
     }
 
-    // Add or update highlights for selected pieces
+    const ringTex = this.getTabletopiaRingTexture();
+
+    // Add or update Tabletopia light blue ring highlights for selected pieces
     for (const id of this.selectedPieceIds) {
       const mesh = this.pieceMeshes.get(id);
       if (!mesh) continue;
 
+      const pieceData = (mesh as any).pieceData;
+      const dims = this.getPieceDimensions(pieceData);
+      const radius = Math.max(dims.x, dims.z) * 0.72;
+
       let highlightMesh = this.selectionHighlightMeshes.get(id);
       if (!highlightMesh) {
-        const radius = (mesh as any).pieceData?.dimensions?.x
-          ? Math.max((mesh as any).pieceData.dimensions.x, (mesh as any).pieceData.dimensions.z || 1) * 0.75
-          : 0.9;
-
-        const ringGeo = new THREE.RingGeometry(radius * 0.9, radius * 1.15, 32);
+        const ringGeo = new THREE.PlaneGeometry(radius * 2.2, radius * 2.2);
         ringGeo.rotateX(-Math.PI / 2);
         const ringMat = new THREE.MeshBasicMaterial({
-          color: 0x38bdf8,
-          side: THREE.DoubleSide,
+          map: ringTex,
           transparent: true,
-          opacity: 0.85,
+          opacity: 0.95,
+          depthWrite: false,
+          side: THREE.DoubleSide,
         });
 
         highlightMesh = new THREE.Mesh(ringGeo, ringMat);
@@ -2243,7 +3103,9 @@ export class TabletopRenderer {
         this.selectionHighlightMeshes.set(id, highlightMesh);
       }
 
-      highlightMesh.position.set(mesh.position.x, this.currentTableConfig.height + 0.03, mesh.position.z);
+      // Position flush at the exact base of the selected piece
+      const baseElevation = mesh.position.y - dims.y / 2 + 0.012;
+      highlightMesh.position.set(mesh.position.x, baseElevation, mesh.position.z);
     }
   }
 
@@ -2252,9 +3114,10 @@ export class TabletopRenderer {
     for (const [id, highlight] of this.selectionHighlightMeshes.entries()) {
       const mesh = this.pieceMeshes.get(id);
       if (mesh) {
+        const dims = this.getPieceDimensions((mesh as any).pieceData);
         highlight.position.x = mesh.position.x;
         highlight.position.z = mesh.position.z;
-        highlight.position.y = this.currentTableConfig.height + 0.03;
+        highlight.position.y = mesh.position.y - dims.y / 2 + 0.012;
       }
     }
   }

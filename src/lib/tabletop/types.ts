@@ -21,6 +21,7 @@ export type PieceShapeType =
   | 'chess_piece'
   | 'checker'
   | 'block'
+  | 'board'
   | 'counter'
   | 'custom_token'
   | 'custom_model'
@@ -61,16 +62,33 @@ export interface Vector3D {
 }
 
 /**
- * Calculates realistic card deck height based on card count.
- * 1 card: ~0.008 units (~0.4mm in physical scale)
- * 2 cards: ~0.015 units (thin like 2 real cards, NOT a 100-card block!)
- * 52 cards: ~0.265 units (~1.4cm standard poker deck)
- * 100 cards: ~0.505 units
+ * Dynamically scales the 3D model height (Y-axis) of a deck based on the number of cards in its metadata.
+ * Ensures a single card is thin (~0.008 units / 0.4mm) and a deck of 52 cards is visually thick (~0.320 units / 1.75cm).
  */
 export function calculateDeckHeight(cardCount: number): number {
   if (cardCount <= 1) return 0.008;
-  if (cardCount === 2) return 0.015;
-  return Math.max(0.015, Math.min(0.65, 0.015 + (cardCount - 2) * 0.005));
+  if (cardCount === 2) return 0.016;
+  const baseThin = 0.008;
+  const target52Thick = 0.32;
+  const stepPerCard = (target52Thick - baseThin) / 51;
+  const computedHeight = baseThin + (cardCount - 1) * stepPerCard;
+  return Math.max(0.008, Math.min(0.85, Math.round(computedHeight * 1000) / 1000));
+}
+
+/**
+ * Extracts card count from metadata or piece properties and calculates the dynamic 3D model height.
+ */
+export function calculateDeckHeightFromMetadata(
+  input?: { metadata?: { cards?: string[]; count?: number; cardsCount?: number }; value?: number } | number | null
+): number {
+  if (input === null || input === undefined) return 0.008;
+  if (typeof input === 'number') return calculateDeckHeight(input);
+  const cards = input.metadata?.cards;
+  if (Array.isArray(cards)) return calculateDeckHeight(cards.length);
+  if (typeof input.metadata?.count === 'number') return calculateDeckHeight(input.metadata.count);
+  if (typeof input.metadata?.cardsCount === 'number') return calculateDeckHeight(input.metadata.cardsCount);
+  if (typeof input.value === 'number') return calculateDeckHeight(input.value);
+  return calculateDeckHeight(52);
 }
 
 export interface Quaternion4D {
@@ -298,6 +316,8 @@ export type ClientMessage =
   | { type: 'clear_pieces' }
   | { type: 'load_preset'; presetName: string }
   | { type: 'group_pieces'; pieceIds: string[] } // TTS 'G' Group key
+  | { type: 'cascade_cards'; pieceIds: string[] } // FreeCell / Solitaire cascading column
+  | { type: 'fan_cards'; pieceIds: string[] } // Horizontal splay / fan
   | { type: 'stack_pieces'; sourcePieceIds: string[]; targetPieceId: string } // TTS Drop Stacking
   | { type: 'modify_counter'; pieceId: string; delta: number } // TTS Counter +/-
   | { type: 'shuffle_deck'; pieceId: string }

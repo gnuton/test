@@ -4,14 +4,16 @@
  */
 
 import React from 'react';
-import { Layers, RotateCcw, RotateCw, Lock, Trash2, X, Hand, FlipHorizontal } from 'lucide-react';
+import { Layers, RotateCcw, RotateCw, Lock, Trash2, X, Hand } from 'lucide-react';
 import { TabletopPieceData } from '../lib/tabletop/types.js';
 
 interface Props {
   selectedPieceIds: string[];
   pieces: Map<string, TabletopPieceData>;
   onGroupSelected: () => void;
-  onFlipSelected: () => void;
+  onCascadeSelected?: () => void;
+  onFanSelected?: () => void;
+  onFlipSelected?: () => void;
   onRotateSelected: (clockwise: boolean) => void;
   onLockSelected: () => void;
   onDeleteSelected: () => void;
@@ -23,6 +25,8 @@ export const SelectionHUD: React.FC<Props> = ({
   selectedPieceIds,
   pieces,
   onGroupSelected,
+  onCascadeSelected,
+  onFanSelected,
   onFlipSelected,
   onRotateSelected,
   onLockSelected,
@@ -48,12 +52,34 @@ export const SelectionHUD: React.FC<Props> = ({
         {/* Group / Stack Button (TTS 'G' key) */}
         <button
           onClick={onGroupSelected}
-          title="Stack / Group into deck or stack (Hotkey: G)"
+          title="Stack / Group into deck or column (Hotkey: G)"
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-medium text-xs shadow transition active:scale-95"
         >
           <Layers className="w-3.5 h-3.5" />
           <span>Stack (G)</span>
         </button>
+
+        {/* Cascade Column (FreeCell / Solitaire style) */}
+        {hasCards && count >= 2 && onCascadeSelected && (
+          <button
+            onClick={onCascadeSelected}
+            title="Cascade cards into overlapping column (FreeCell / Solitaire tableau)"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white font-medium text-xs border border-slate-700 transition active:scale-95"
+          >
+            <span>Cascade</span>
+          </button>
+        )}
+
+        {/* Fan Horizontal Row */}
+        {hasCards && count >= 2 && onFanSelected && (
+          <button
+            onClick={onFanSelected}
+            title="Fan out cards horizontally (Hand / Splay layout)"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white font-medium text-xs border border-slate-700 transition active:scale-95"
+          >
+            <span>Fan</span>
+          </button>
+        )}
 
         {/* Take to Hand (Hotkey: H) */}
         {hasCards && onPickupToHand && (
@@ -66,16 +92,6 @@ export const SelectionHUD: React.FC<Props> = ({
             <span>To Hand (H)</span>
           </button>
         )}
-
-        {/* Flip (TTS 'F' key) */}
-        <button
-          onClick={onFlipSelected}
-          title="Flip face up / face down (Hotkey: F)"
-          className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white font-medium text-xs border border-slate-700 transition active:scale-95"
-        >
-          <FlipHorizontal className="w-3.5 h-3.5 text-indigo-400" />
-          <span>Flip (F)</span>
-        </button>
 
         {/* Rotate Left (TTS 'Q' key) */}
         <button

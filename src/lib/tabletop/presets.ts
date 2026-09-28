@@ -41,6 +41,19 @@ export function getPresetTableConfig(presetName: string): TableConfig {
         environment: 'studio',
         grid: { ...baseGrid },
       };
+    case 'freecell':
+      return {
+        shape: 'rectangular',
+        width: 18,
+        length: 24,
+        height: 2.0,
+        feltColor: '#064e3b',
+        woodColor: '#1c1917',
+        hasRim: true,
+        gravity: 9.81,
+        environment: 'studio',
+        grid: { ...baseGrid },
+      };
     case 'poker':
       return {
         shape: 'oval',
@@ -311,6 +324,78 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
       break;
     }
 
+    case 'freecell': {
+      // Authentic FreeCell Game Setup:
+      // 52 cards dealt entirely FACE-UP across 8 cascading tableau columns
+      // 4 Free Cells (top-left) and 4 Foundation Piles (top-right)
+      const freeCellCards: string[][] = [
+        ['7♦', 'A♣', 'K♦', '8♠', '5♥', '2♣', 'J♠'],
+        ['8♦', '2♠', 'Q♦', '9♣', '6♥', '3♣', 'Q♠'],
+        ['9♦', '3♠', 'J♦', '10♣', '7♥', '4♣', 'K♠'],
+        ['10♦', '4♠', '10♠', 'J♣', '8♥', '5♣', 'A♥'],
+        ['J♥', '5♠', '9♥', 'Q♣', '9♠', '6♣'],
+        ['Q♥', '6♠', '8♣', 'K♣', '10♥', '7♣'],
+        ['K♥', '7♠', '2♦', 'A♦', '6♦', 'A♠'],
+        ['2♥', '3♥', '4♦', '5♦', '3♦', '4♠'],
+      ];
+
+      // 1. 8 Cascading Tableau Columns (all cards face-up with staggered Z-offset)
+      freeCellCards.forEach((cardsInCol, colIdx) => {
+        const colX = -5.25 + colIdx * 1.5;
+        cardsInCol.forEach((cardLabel, cardIdx) => {
+          const suit = cardLabel.slice(-1);
+          const isRed = suit === '♥' || suit === '♦';
+          pieces.push({
+            id: `fc-col-${colIdx}-${cardIdx}`,
+            type: 'card',
+            name: `Card ${cardLabel}`,
+            label: cardLabel,
+            position: { x: colX, y: y + cardIdx * 0.008, z: -0.8 + cardIdx * 0.42 },
+            // In FreeCell, all 52 cards are face up!
+            rotation: { x: 0, y: 0, z: 0, w: 1 },
+            mass: 0.04,
+            color: '#ffffff',
+            secondaryColor: isRed ? '#dc2626' : '#0f172a',
+          });
+        });
+      });
+
+      // 2. 4 Free Cells (top left)
+      for (let i = 0; i < 4; i++) {
+        pieces.push({
+          id: `fc-freecell-${i}`,
+          type: 'card',
+          name: `Free Cell ${i + 1}`,
+          label: '[ FREE ]',
+          position: { x: -5.25 + i * 1.5, y: y, z: -3.8 },
+          rotation: { x: 0, y: 0, z: 0, w: 1 },
+          mass: 0.02,
+          color: '#0f291e',
+          secondaryColor: '#34d399',
+          isLocked: true,
+        });
+      }
+
+      // 3. 4 Foundation Slots (top right: Spades, Hearts, Diamonds, Clubs)
+      const suits = ['♠', '♥', '♦', '♣'];
+      suits.forEach((s, idx) => {
+        const isRed = s === '♥' || s === '♦';
+        pieces.push({
+          id: `fc-foundation-${idx}`,
+          type: 'card',
+          name: `Foundation ${s}`,
+          label: `[ ${s} ]`,
+          position: { x: 0.75 + idx * 1.5, y: y, z: -3.8 },
+          rotation: { x: 0, y: 0, z: 0, w: 1 },
+          mass: 0.02,
+          color: '#0f291e',
+          secondaryColor: isRed ? '#f87171' : '#e2e8f0',
+          isLocked: true,
+        });
+      });
+      break;
+    }
+
     case 'poker': {
       pieces.push({
         id: 'deck-main',
@@ -402,59 +487,98 @@ export function getPresetPieces(presetName: string, tableHeight: number = 2.0): 
       const backRankWhite = ['Rook', 'Knight', 'Bishop', 'Queen', 'King', 'Bishop', 'Knight', 'Rook'];
       const backRankBlack = ['Rook', 'Knight', 'Bishop', 'Queen', 'King', 'Bishop', 'Knight', 'Rook'];
 
+      // Tournament Chess Board (Standard 8x8 squares + wooden coordinate notation border)
+      const boardThickness = 0.08;
+      const boardY = tableHeight + boardThickness / 2;
+      const boardSurfaceY = tableHeight + boardThickness;
+      pieces.push({
+        id: 'chess-board-main',
+        type: 'board',
+        name: 'Tournament Chess Board',
+        position: { x: 0, y: boardY, z: 0 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        mass: 0,
+        isLocked: true,
+        dimensions: { x: 9.8, y: boardThickness, z: 9.8 },
+        color: '#f0d9b5',
+        secondaryColor: '#b58863',
+      });
+
+      const getRoleHeight = (role: string) => {
+        const r = role.toLowerCase();
+        if (r.includes('king')) return 1.35;
+        if (r.includes('queen')) return 1.25;
+        if (r.includes('bishop')) return 1.15;
+        if (r.includes('knight')) return 1.10;
+        if (r.includes('rook')) return 1.05;
+        return 0.95;
+      };
+
       const step = 1.1;
       const startX = -((7 * step) / 2);
 
       backRankWhite.forEach((pieceName, i) => {
+        const pieceH = getRoleHeight(pieceName);
+        const pieceCenterY = boardSurfaceY + pieceH / 2;
         pieces.push({
           id: `chess-w-${pieceName.toLowerCase()}-${i}`,
           type: 'chess_piece',
           name: `White ${pieceName}`,
-          position: { x: startX + i * step, y: y, z: 3.85 },
+          position: { x: startX + i * step, y: pieceCenterY, z: 3.85 },
           rotation: { x: 0, y: 0, z: 0, w: 1 },
           mass: 0.15,
           color: '#f8fafc',
           label: pieceName[0],
+          dimensions: { x: 0.65, y: pieceH, z: 0.65 },
           metadata: { side: 'white', role: pieceName },
         });
       });
       for (let i = 0; i < 8; i++) {
+        const pawnH = 0.95;
+        const pawnCenterY = boardSurfaceY + pawnH / 2;
         pieces.push({
           id: `chess-w-pawn-${i}`,
           type: 'chess_piece',
           name: `White Pawn ${files[i]}`,
-          position: { x: startX + i * step, y: y, z: 2.75 },
+          position: { x: startX + i * step, y: pawnCenterY, z: 2.75 },
           rotation: { x: 0, y: 0, z: 0, w: 1 },
           mass: 0.12,
           color: '#f8fafc',
           label: 'P',
+          dimensions: { x: 0.65, y: pawnH, z: 0.65 },
           metadata: { side: 'white', role: 'Pawn' },
         });
       }
 
       backRankBlack.forEach((pieceName, i) => {
+        const pieceH = getRoleHeight(pieceName);
+        const pieceCenterY = boardSurfaceY + pieceH / 2;
         pieces.push({
           id: `chess-b-${pieceName.toLowerCase()}-${i}`,
           type: 'chess_piece',
           name: `Black ${pieceName}`,
-          position: { x: startX + i * step, y: y, z: -3.85 },
+          position: { x: startX + i * step, y: pieceCenterY, z: -3.85 },
           rotation: { x: 0, y: 1, z: 0, w: 0 },
           mass: 0.15,
           color: '#1e293b',
           label: pieceName[0],
+          dimensions: { x: 0.65, y: pieceH, z: 0.65 },
           metadata: { side: 'black', role: pieceName },
         });
       });
       for (let i = 0; i < 8; i++) {
+        const pawnH = 0.95;
+        const pawnCenterY = boardSurfaceY + pawnH / 2;
         pieces.push({
           id: `chess-b-pawn-${i}`,
           type: 'chess_piece',
           name: `Black Pawn ${files[i]}`,
-          position: { x: startX + i * step, y: y, z: -2.75 },
+          position: { x: startX + i * step, y: pawnCenterY, z: -2.75 },
           rotation: { x: 0, y: 1, z: 0, w: 0 },
           mass: 0.12,
           color: '#1e293b',
           label: 'P',
+          dimensions: { x: 0.65, y: pawnH, z: 0.65 },
           metadata: { side: 'black', role: 'Pawn' },
         });
       }

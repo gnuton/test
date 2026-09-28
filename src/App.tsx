@@ -694,7 +694,6 @@ export default function App() {
         onRedo={() => clientRef.current?.redo()}
         canUndo={canUndo}
         canRedo={canRedo}
-        onFlipTable={() => clientRef.current?.flipTable(1.4)}
         degreeSnap={degreeSnap}
         onSetDegreeSnap={(deg) => {
           setDegreeSnap(deg);
@@ -773,7 +772,6 @@ export default function App() {
 
       {/* Action Toolbar */}
       <ActionToolbar
-        onFlipTable={() => clientRef.current?.flipTable(1.4)}
         onRollAllDice={() => clientRef.current?.rollAllDice()}
         onShuffleDeck={() => clientRef.current?.shuffleDeck()}
         onDealCards={(count) => clientRef.current?.dealCards(count)}
@@ -791,23 +789,6 @@ export default function App() {
         onToggleChat={handleToggleChat}
         unreadCount={unreadCount}
         onOpenDeckSearch={handleOpenDeckSearch}
-        onFlipCoin={() => {
-          // Find coin or spawn coin and flip
-          const coin = Array.from(clientRef.current?.pieces.values() || []).find((p) => p.type === 'coin');
-          if (coin) {
-            clientRef.current?.flipCoin(coin.id);
-          } else {
-            clientRef.current?.spawnPiece({
-              type: 'coin',
-              name: 'Gold Coin',
-              position: { x: 0, y: tableConfig.height + 0.6, z: 0 },
-            });
-            setTimeout(() => {
-              const newCoin = Array.from(clientRef.current?.pieces.values() || []).find((p) => p.type === 'coin');
-              if (newCoin) clientRef.current?.flipCoin(newCoin.id);
-            }, 100);
-          }
-        }}
       />
 
       {/* Keybinds HUD */}
@@ -986,6 +967,8 @@ export default function App() {
         selectedPieceIds={selectedPieceIds}
         pieces={clientRef.current?.pieces || new Map()}
         onGroupSelected={handleGroupSelected}
+        onCascadeSelected={() => clientRef.current?.cascadeCards(selectedPieceIds)}
+        onFanSelected={() => clientRef.current?.fanCards(selectedPieceIds)}
         onFlipSelected={handleFlipSelected}
         onRotateSelected={handleRotateSelected}
         onLockSelected={handleLockSelected}

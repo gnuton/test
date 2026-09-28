@@ -488,8 +488,34 @@ export class TabletopServerRoom {
             this.broadcast({ type: 'piece_removed', pieceId: remId });
           }
           this.broadcast({ type: 'piece_spawned', piece: groupResult.createdDeck });
+        } else if (groupResult && groupResult.updatedPieces) {
+          for (const p of groupResult.updatedPieces) {
+            this.broadcast({ type: 'piece_spawned', piece: p });
+          }
         }
         this.addSystemMessage(`🎴 ${client.player.name} grouped pieces into a stack.`);
+        break;
+      }
+
+      case 'cascade_cards': {
+        const cascadeResult = this.physics.arrangeCardsCascade(msg.pieceIds);
+        if (cascadeResult && cascadeResult.updatedPieces) {
+          for (const p of cascadeResult.updatedPieces) {
+            this.broadcast({ type: 'piece_spawned', piece: p });
+          }
+        }
+        this.addSystemMessage(`🃏 ${client.player.name} cascaded cards into a column.`);
+        break;
+      }
+
+      case 'fan_cards': {
+        const fanResult = this.physics.arrangeCardsFan(msg.pieceIds);
+        if (fanResult && fanResult.updatedPieces) {
+          for (const p of fanResult.updatedPieces) {
+            this.broadcast({ type: 'piece_spawned', piece: p });
+          }
+        }
+        this.addSystemMessage(`🃏 ${client.player.name} fanned out cards.`);
         break;
       }
 
@@ -501,6 +527,10 @@ export class TabletopServerRoom {
             this.broadcast({ type: 'piece_removed', pieceId: remId });
           }
           this.broadcast({ type: 'piece_spawned', piece: stackResult.createdDeck });
+        } else if (stackResult && stackResult.updatedPieces) {
+          for (const p of stackResult.updatedPieces) {
+            this.broadcast({ type: 'piece_spawned', piece: p });
+          }
         }
         this.addSystemMessage(`🎴 ${client.player.name} stacked pieces.`);
         break;

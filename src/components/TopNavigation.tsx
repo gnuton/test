@@ -65,7 +65,6 @@ interface Props {
   onRedo: () => void;
   canUndo?: boolean;
   canRedo?: boolean;
-  onFlipTable: () => void;
   degreeSnap: number;
   onSetDegreeSnap: (deg: number) => void;
 }
@@ -102,29 +101,17 @@ export const TopNavigation: React.FC<Props> = ({
   onRedo,
   canUndo = true,
   canRedo = false,
-  onFlipTable,
   degreeSnap,
   onSetDegreeSnap,
 }) => {
   const [copiedLink, setCopiedLink] = useState(false);
   const [showGamesMenu, setShowGamesMenu] = useState(false);
   const [showOptionsMenu, setShowOptionsMenu] = useState(false);
-  const [tableFlipConfirm, setTableFlipConfirm] = useState(false);
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(window.location.href);
     setCopiedLink(true);
     setTimeout(() => setCopiedLink(false), 2000);
-  };
-
-  const handleFlipTable = () => {
-    if (!tableFlipConfirm) {
-      setTableFlipConfirm(true);
-      setTimeout(() => setTableFlipConfirm(false), 3000);
-      return;
-    }
-    setTableFlipConfirm(false);
-    onFlipTable();
   };
 
   return (
@@ -348,44 +335,7 @@ export const TopNavigation: React.FC<Props> = ({
             <Redo2 className="w-4 h-4 text-sky-400" />
           </button>
 
-          <div className="w-[1px] h-4 bg-slate-700 mx-1" />
-
-          {/* 7. Iconic FLIP TABLE Button */}
-          <button
-            onClick={handleFlipTable}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-black tracking-wide uppercase transition shadow-md ${
-              tableFlipConfirm
-                ? 'bg-rose-500 text-white animate-bounce'
-                : 'bg-gradient-to-r from-red-600 to-rose-700 hover:from-red-500 hover:to-rose-600 text-white'
-            }`}
-            title="Flip Table (Rage Quit physics simulation - use Undo to restore!)"
-          >
-            <Flame className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">
-              {tableFlipConfirm ? 'Confirm Flip!' : 'Flip Table'}
-            </span>
-          </button>
-
           <div className="hidden lg:flex items-center gap-1 border-l border-slate-700 ml-1 pl-1.5">
-            {/* 8. Rotation Degree Snap Selector */}
-            <span className="text-[10px] font-bold text-slate-400">Rot:</span>
-            {[15, 30, 45, 90].map((deg) => (
-              <button
-                key={deg}
-                onClick={() => onSetDegreeSnap(deg)}
-                className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold transition ${
-                  degreeSnap === deg
-                    ? 'bg-emerald-500 text-white shadow-sm'
-                    : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-                }`}
-                title={`Rotate Snap ${deg}° (Hotkeys: Q / E)`}
-              >
-                {deg}°
-              </button>
-            ))}
-
-            <div className="w-[1px] h-4 bg-slate-700 mx-1" />
-
             {/* Top-Down & 3D camera quick switch */}
             <button
               onClick={() => onSetCameraPreset('top_down')}

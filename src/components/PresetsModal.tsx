@@ -40,6 +40,14 @@ export const PresetsModal: React.FC<Props> = ({
       pieces: '7 Tableau Columns, 4 Foundation Spots, Stock Deck',
     },
     {
+      id: 'freecell',
+      name: 'FreeCell Solitaire',
+      desc: 'All 52 cards face-up in 8 cascading tableau columns, 4 open free cells, and 4 suit foundation piles.',
+      icon: Layers,
+      color: 'from-emerald-600 to-teal-700',
+      pieces: '8 Cascading Columns (52 cards face-up), 4 Free Cells, 4 Foundations',
+    },
+    {
       id: 'poker',
       name: 'Texas Hold\'em Poker',
       desc: 'Classic oval felt table, standard 52-card deck, community cards, dealer button, and 30 stackable $1-$500 chips.',

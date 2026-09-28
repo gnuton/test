@@ -778,7 +778,18 @@ export class TabletopClient {
   }
 
   public groupPieces(pieceIds: string[]) {
+    this.saveHistorySnapshot();
     this.sendMessage({ type: 'group_pieces', pieceIds });
+  }
+
+  public cascadeCards(pieceIds: string[]) {
+    this.saveHistorySnapshot();
+    this.sendMessage({ type: 'cascade_cards', pieceIds });
+  }
+
+  public fanCards(pieceIds: string[]) {
+    this.saveHistorySnapshot();
+    this.sendMessage({ type: 'fan_cards', pieceIds });
   }
 
   public rollDice(pieceId: string) {

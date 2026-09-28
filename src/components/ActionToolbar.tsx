@@ -5,7 +5,6 @@
 import React, { useState } from 'react';
 import {
   Dices,
-  Flame,
   Plus,
   RefreshCw,
   Ruler,
@@ -17,7 +16,6 @@ import {
 } from 'lucide-react';
 
 interface Props {
-  onFlipTable: () => void;
   onRollAllDice: () => void;
   onShuffleDeck: () => void;
   onDealCards: (count: number) => void;
@@ -29,11 +27,9 @@ interface Props {
   onToggleChat: () => void;
   unreadCount?: number;
   onOpenDeckSearch?: () => void;
-  onFlipCoin?: () => void;
 }
 
 export const ActionToolbar: React.FC<Props> = ({
-  onFlipTable,
   onRollAllDice,
   onShuffleDeck,
   onDealCards,
@@ -45,20 +41,8 @@ export const ActionToolbar: React.FC<Props> = ({
   onToggleChat,
   unreadCount = 0,
   onOpenDeckSearch,
-  onFlipCoin,
 }) => {
   const [showCardsDropdown, setShowCardsDropdown] = useState(false);
-  const [tableFlipConfirm, setTableFlipConfirm] = useState(false);
-
-  const handleFlipTable = () => {
-    if (!tableFlipConfirm) {
-      setTableFlipConfirm(true);
-      setTimeout(() => setTableFlipConfirm(false), 3000);
-      return;
-    }
-    setTableFlipConfirm(false);
-    onFlipTable();
-  };
 
   return (
     <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 p-1.5 bg-slate-900/90 backdrop-blur-md border border-slate-800/80 rounded-2xl shadow-2xl">
@@ -80,17 +64,6 @@ export const ActionToolbar: React.FC<Props> = ({
         <Dices className="w-4 h-4 text-amber-400" />
         <span className="hidden sm:inline">Roll All</span>
       </button>
-
-      {/* Quick Coin Flip */}
-      {onFlipCoin && (
-        <button
-          onClick={onFlipCoin}
-          className="flex items-center gap-1 px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-bold transition shadow-sm"
-          title="Flip Coin"
-        >
-          <span className="text-sm">🪙</span>
-        </button>
-      )}
 
       {/* 3. Cards & Deck Popover */}
       <div className="relative">
@@ -200,23 +173,6 @@ export const ActionToolbar: React.FC<Props> = ({
             {unreadCount}
           </span>
         )}
-      </button>
-
-      {/* Divider */}
-      <div className="w-px h-6 bg-slate-800 mx-0.5" />
-
-      {/* 8. 💥 THE ICONIC FLIP TABLE BUTTON */}
-      <button
-        onClick={handleFlipTable}
-        className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-black transition-all shadow-md active:scale-95 ${
-          tableFlipConfirm
-            ? 'bg-rose-600 hover:bg-rose-500 text-white animate-bounce'
-            : 'bg-gradient-to-r from-red-600 to-rose-700 hover:from-red-500 hover:to-rose-600 text-white'
-        }`}
-        title="Flip Table! (╯°□°)╯︵ ┻━┻"
-      >
-        <Flame className="w-4 h-4 text-yellow-300" />
-        <span>{tableFlipConfirm ? 'Click to FLIP!' : 'Flip Table'}</span>
       </button>
     </div>
   );

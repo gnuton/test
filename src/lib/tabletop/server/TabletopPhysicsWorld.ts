@@ -36,6 +36,7 @@ export class TabletopPhysicsWorld {
 
   private tableBody: CANNON.Body | null = null;
   private rimBodies: CANNON.Body[] = [];
+  private invisibleBoundaryBodies: CANNON.Body[] = [];
   private floorBody: CANNON.Body | null = null;
 
   // Dice roll tracking
@@ -65,6 +66,7 @@ export class TabletopPhysicsWorld {
   private diceMaterial: CANNON.Material;
   private cardMaterial: CANNON.Material;
   private chipMaterial: CANNON.Material;
+  private boundaryMaterial: CANNON.Material;
 
   constructor(tableConfig: TableConfig) {
     this.tableConfig = tableConfig;
@@ -73,7 +75,8 @@ export class TabletopPhysicsWorld {
     });
 
     this.world.broadphase = new CANNON.NaiveBroadphase();
-    (this.world.solver as any).iterations = 10;
+    (this.world.solver as any).iterations = 25;
+    (this.world.solver as any).tolerance = 0.001;
     this.world.allowSleep = true;
 
     // Initialize materials
@@ -83,47 +86,102 @@ export class TabletopPhysicsWorld {
     this.cardMaterial = new CANNON.Material('card');
     this.chipMaterial = new CANNON.Material('chip');
 
-    // Contact Materials
+    // Contact Materials (Rigid contact stiffness, zero restitution on stacked items to eliminate jitter)
     this.world.addContactMaterial(
       new CANNON.ContactMaterial(this.diceMaterial, this.feltMaterial, {
-        friction: 0.35,
-        restitution: 0.45,
+        friction: 0.4,
+        restitution: 0.35,
       })
     );
     this.world.addContactMaterial(
       new CANNON.ContactMaterial(this.diceMaterial, this.diceMaterial, {
-        friction: 0.3,
-        restitution: 0.5,
+        friction: 0.35,
+        restitution: 0.4,
       })
     );
     this.world.addContactMaterial(
       new CANNON.ContactMaterial(this.chipMaterial, this.chipMaterial, {
-        friction: 0.8,
-        restitution: 0.15,
+        friction: 0.9,
+        restitution: 0.0, // Zero restitution prevents poker token bouncing
+        contactEquationStiffness: 1e8,
+        contactEquationRelaxation: 3,
+        frictionEquationStiffness: 1e8,
       })
     );
     this.world.addContactMaterial(
       new CANNON.ContactMaterial(this.chipMaterial, this.feltMaterial, {
-        friction: 0.6,
-        restitution: 0.2,
+        friction: 0.75,
+        restitution: 0.05,
+        contactEquationStiffness: 1e8,
+        contactEquationRelaxation: 3,
       })
     );
     this.world.addContactMaterial(
       new CANNON.ContactMaterial(this.cardMaterial, this.feltMaterial, {
-        friction: 0.5,
-        restitution: 0.05,
+        friction: 0.7,
+        restitution: 0.0,
+        contactEquationStiffness: 1e8,
+        contactEquationRelaxation: 3,
       })
     );
     this.world.addContactMaterial(
       new CANNON.ContactMaterial(this.cardMaterial, this.cardMaterial, {
-        friction: 0.6,
-        restitution: 0.02,
+        friction: 0.85,
+        restitution: 0.0, // Zero restitution prevents card oscillation
+        contactEquationStiffness: 1e8,
+        contactEquationRelaxation: 3,
+        frictionEquationStiffness: 1e8,
       })
     );
     this.world.addContactMaterial(
-      new CANNON.ContactMaterial(this.chipMaterial, this.chipMaterial, {
-        friction: 0.6,
+      new CANNON.ContactMaterial(this.chipMaterial, this.cardMaterial, {
+        friction: 0.85,
+        restitution: 0.0,
+        contactEquationStiffness: 1e8,
+        contactEquationRelaxation: 3,
+      })
+    );
+    this.world.addContactMaterial(
+      new CANNON.ContactMaterial(this.woodMaterial, this.cardMaterial, {
+        friction: 0.8,
+        restitution: 0.0,
+        contactEquationStiffness: 1e8,
+        contactEquationRelaxation: 3,
+      })
+    );
+    this.world.addContactMaterial(
+      new CANNON.ContactMaterial(this.woodMaterial, this.chipMaterial, {
+        friction: 0.8,
+        restitution: 0.0,
+        contactEquationStiffness: 1e8,
+        contactEquationRelaxation: 3,
+      })
+    );
+
+    // Invisible boundary box material and contacts
+    this.boundaryMaterial = new CANNON.Material('invisible_boundary');
+    this.world.addContactMaterial(
+      new CANNON.ContactMaterial(this.diceMaterial, this.boundaryMaterial, {
+        friction: 0.2,
+        restitution: 0.35,
+      })
+    );
+    this.world.addContactMaterial(
+      new CANNON.ContactMaterial(this.cardMaterial, this.boundaryMaterial, {
+        friction: 0.3,
         restitution: 0.08,
+      })
+    );
+    this.world.addContactMaterial(
+      new CANNON.ContactMaterial(this.chipMaterial, this.boundaryMaterial, {
+        friction: 0.3,
+        restitution: 0.2,
+      })
+    );
+    this.world.addContactMaterial(
+      new CANNON.ContactMaterial(this.woodMaterial, this.boundaryMaterial, {
+        friction: 0.25,
+        restitution: 0.2,
       })
     );
 
@@ -223,6 +281,10 @@ export class TabletopPhysicsWorld {
       this.world.removeBody(rim);
     }
     this.rimBodies = [];
+    for (const bound of this.invisibleBoundaryBodies) {
+      this.world.removeBody(bound);
+    }
+    this.invisibleBoundaryBodies = [];
     if (this.floorBody) {
       this.world.removeBody(this.floorBody);
       this.floorBody = null;
@@ -276,6 +338,49 @@ export class TabletopPhysicsWorld {
       this.rimBodies.push(westRim);
     }
 
+    // Invisible Bounding Box around the table (4 vertical walls + 1 ceiling)
+    // Ensures NO pieces can fly outside the table enclosure!
+    const boxHeight = 4.2;
+    const wallThickness = 0.6;
+    const halfW = width / 2;
+    const halfL = length / 2;
+    const wallCenterY = tableY + boxHeight / 2;
+
+    // Invisible North Wall (+Z)
+    const northWall = new CANNON.Body({ mass: 0, material: this.boundaryMaterial });
+    northWall.addShape(new CANNON.Box(new CANNON.Vec3(halfW + wallThickness, boxHeight / 2, wallThickness / 2)));
+    northWall.position.set(0, wallCenterY, halfL + wallThickness / 2);
+    this.world.addBody(northWall);
+    this.invisibleBoundaryBodies.push(northWall);
+
+    // Invisible South Wall (-Z)
+    const southWall = new CANNON.Body({ mass: 0, material: this.boundaryMaterial });
+    southWall.addShape(new CANNON.Box(new CANNON.Vec3(halfW + wallThickness, boxHeight / 2, wallThickness / 2)));
+    southWall.position.set(0, wallCenterY, -halfL - wallThickness / 2);
+    this.world.addBody(southWall);
+    this.invisibleBoundaryBodies.push(southWall);
+
+    // Invisible East Wall (+X)
+    const eastWall = new CANNON.Body({ mass: 0, material: this.boundaryMaterial });
+    eastWall.addShape(new CANNON.Box(new CANNON.Vec3(wallThickness / 2, boxHeight / 2, halfL + wallThickness)));
+    eastWall.position.set(halfW + wallThickness / 2, wallCenterY, 0);
+    this.world.addBody(eastWall);
+    this.invisibleBoundaryBodies.push(eastWall);
+
+    // Invisible West Wall (-X)
+    const westWall = new CANNON.Body({ mass: 0, material: this.boundaryMaterial });
+    westWall.addShape(new CANNON.Box(new CANNON.Vec3(wallThickness / 2, boxHeight / 2, halfL + wallThickness)));
+    westWall.position.set(-halfW - wallThickness / 2, wallCenterY, 0);
+    this.world.addBody(westWall);
+    this.invisibleBoundaryBodies.push(westWall);
+
+    // Invisible Ceiling (+Y)
+    const ceiling = new CANNON.Body({ mass: 0, material: this.boundaryMaterial });
+    ceiling.addShape(new CANNON.Box(new CANNON.Vec3(halfW + wallThickness, wallThickness / 2, halfL + wallThickness)));
+    ceiling.position.set(0, tableY + boxHeight + wallThickness / 2, 0);
+    this.world.addBody(ceiling);
+    this.invisibleBoundaryBodies.push(ceiling);
+
     const floorShape = new CANNON.Plane();
     this.floorBody = new CANNON.Body({ mass: 0 });
     this.floorBody.addShape(floorShape);
@@ -314,7 +419,39 @@ export class TabletopPhysicsWorld {
     return body;
   }
 
+  // Wake up any pieces that were resting directly on top of or adjacent to a removed/grabbed piece
+  public wakeUpRestingPiecesAbove(pieceId: string) {
+    const body = this.bodies.get(pieceId);
+    if (!body) return;
+    const pos = body.position;
+    const piece = this.pieceData.get(pieceId);
+    const dims = piece?.dimensions || (piece ? this.getDefaultDimensions(piece.type, piece) : { x: 1, y: 0.1, z: 1 });
+    const radiusSq = Math.max(1.5, dims.x * dims.x + dims.z * dims.z);
+
+    for (const [otherId, otherBody] of this.bodies.entries()) {
+      if (otherId === pieceId) continue;
+      const otherPiece = this.pieceData.get(otherId);
+      if (otherPiece?.isLocked) continue;
+
+      const dx = otherBody.position.x - pos.x;
+      const dz = otherBody.position.z - pos.z;
+      const distSq = dx * dx + dz * dz;
+
+      // If other piece is directly above or immediately touching
+      if (distSq < radiusSq && otherBody.position.y >= pos.y - 0.02) {
+        otherBody.wakeUp();
+        if (otherBody.type !== CANNON.Body.KINEMATIC) {
+          otherBody.type = CANNON.Body.DYNAMIC;
+          if (otherBody.velocity.y >= 0) {
+            otherBody.velocity.y = -0.15; // prompt immediate gravity acceleration to fall
+          }
+        }
+      }
+    }
+  }
+
   public removePiece(id: string) {
+    this.wakeUpRestingPiecesAbove(id);
     const body = this.bodies.get(id);
     if (body) {
       this.world.removeBody(body);
@@ -385,6 +522,13 @@ export class TabletopPhysicsWorld {
     return piece.value;
   }
 
+  // Helper to determine if a piece's local face normal (+Y) is pointing upwards in world space
+  private isPieceFaceUp(rotation?: Quaternion4D): boolean {
+    if (!rotation) return true;
+    const dotUp = 1 - 2 * (rotation.x * rotation.x + rotation.z * rotation.z);
+    return dotUp > 0;
+  }
+
   // TTS 'G' Grouping: Stack cards into decks, or stack chips vertically
   public groupPieces(pieceIds: string[]): { createdDeck?: TabletopPieceData; removedPieceIds: string[] } {
     if (pieceIds.length < 2) return { removedPieceIds: [] };
@@ -401,6 +545,13 @@ export class TabletopPhysicsWorld {
     const areCards = validPieces.every((p) => p.type === 'card' || p.type === 'card_deck');
 
     if (areCards) {
+      // Find which card is on top (highest Y position or last piece)
+      const topPiece = validPieces.reduce((prev, curr) => (curr.position.y > prev.position.y ? curr : prev), validPieces[0]);
+      // If ANY card in the stack was face-up, keep the resulting stack face-up!
+      const anyFaceUp = validPieces.some(p => this.isPieceFaceUp(p.rotation) || p.metadata?.isFaceUp === true);
+      const topIsFaceUp = anyFaceUp || this.isPieceFaceUp(topPiece.rotation);
+      const topLabel = (topPiece.metadata?.topCard) || topPiece.label || topPiece.name || 'A♠';
+
       // Gather all card names/labels
       const allCards: string[] = [];
       const removedIds: string[] = [];
@@ -432,21 +583,25 @@ export class TabletopPhysicsWorld {
       const deckHeight = calculateDeckHeight(cardCount);
       const deckBaseY = this.tableConfig.height + deckHeight / 2;
 
-      // Create consolidated Deck
+      // Create consolidated Deck - PRESERVING FACE-UP ORIENTATION
       const deckId = `deck_grouped_${Date.now()}`;
       const deckPiece: TabletopPieceData = {
         id: deckId,
         type: 'card_deck',
         name: `Deck (${cardCount} Cards)`,
         position: { x: baseX, y: deckBaseY, z: baseZ },
-        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        // Never flip face-up cards: if cards were face-up, keep rotation face-up!
+        rotation: topIsFaceUp ? { x: 0, y: 0, z: 0, w: 1 } : { x: 0, y: 0, z: 1, w: 0 },
         dimensions: { x: 1.15, y: deckHeight, z: 1.65 },
         mass: Math.max(0.04, Math.min(0.5, 0.02 + cardCount * 0.005)),
-        color: '#1e3a8a',
+        color: firstPiece.color || '#1e3a8a',
+        secondaryColor: firstPiece.secondaryColor,
         label: `${cardCount} CARDS`,
         value: cardCount,
         metadata: {
           cards: allCards,
+          topCard: topLabel,
+          isFaceUp: topIsFaceUp,
         },
       };
 
@@ -459,26 +614,140 @@ export class TabletopPhysicsWorld {
       return { createdDeck: deckPiece, removedPieceIds: removedIds };
     }
 
-    // Stacking poker chips / checkers / dominoes
+    // Stacking poker chips / checkers / dominoes / coins
+    const chipThickness = validPieces[0].dimensions?.y || (validPieces[0].type === 'coin' ? 0.05 : 0.08);
+    // Find surface elevation underneath (table top or board surface)
+    let surfaceY = this.tableConfig.height;
+    for (const b of this.pieceData.values()) {
+      if (b.type === 'board') {
+        const bDims = b.dimensions || { x: 9.8, y: 0.08, z: 9.8 };
+        if (
+          baseX >= b.position.x - bDims.x / 2 &&
+          baseX <= b.position.x + bDims.x / 2 &&
+          baseZ >= b.position.z - bDims.z / 2 &&
+          baseZ <= b.position.z + bDims.z / 2
+        ) {
+          surfaceY = b.position.y + bDims.y / 2;
+        }
+      }
+    }
+
+    const updatedPieces: TabletopPieceData[] = [];
     validPieces.forEach((piece, idx) => {
       const body = this.bodies.get(piece.id);
+      const targetY = surfaceY + chipThickness / 2 + idx * chipThickness;
+
       if (body) {
-        body.wakeUp();
-        body.position.set(baseX, baseY + idx * 0.14, baseZ);
+        body.position.set(baseX, targetY, baseZ);
         body.quaternion.set(0, 0, 0, 1);
         body.velocity.set(0, 0, 0);
         body.angularVelocity.set(0, 0, 0);
+        body.sleep(); // Stable stacked column, perfectly flush with zero interpenetration or collapse!
       }
+
+      piece.position = { x: baseX, y: targetY, z: baseZ };
+      piece.rotation = { x: 0, y: 0, z: 0, w: 1 };
+      updatedPieces.push(piece);
     });
 
     if (this.onSoundEventCallback) {
-      this.onSoundEventCallback('chip_clink', 0.9, { x: baseX, y: baseY, z: baseZ });
+      this.onSoundEventCallback('chip_clink', 0.9, { x: baseX, y: surfaceY, z: baseZ });
     }
 
-    return { removedPieceIds: [] };
+    return { removedPieceIds: [], updatedPieces };
   }
 
-  // Auto-stack card onto card/deck, or chip onto chip when dropped near it
+  // FreeCell / Solitaire style cascading column layout (staggered overlap preserving face-up state)
+  public arrangeCardsCascade(pieceIds: string[]): { updatedPieces: TabletopPieceData[] } {
+    if (pieceIds.length < 2) return { updatedPieces: [] };
+    const validPieces = pieceIds
+      .map((id) => this.pieceData.get(id))
+      .filter((p): p is TabletopPieceData => !!p && (p.type === 'card' || p.type === 'card_deck'));
+    if (validPieces.length < 2) return { updatedPieces: [] };
+
+    validPieces.sort((a, b) => a.position.z - b.position.z || a.position.y - b.position.y);
+
+    const rootX = validPieces[0].position.x;
+    const startZ = validPieces[0].position.z;
+    const baseY = this.tableConfig.height + 0.01;
+    const zOffset = 0.42; // Authentic FreeCell tableau offset
+    const yStep = 0.009;
+
+    const updatedPieces: TabletopPieceData[] = [];
+    validPieces.forEach((card, idx) => {
+      const body = this.bodies.get(card.id);
+      const targetZ = startZ + idx * zOffset;
+      const targetY = baseY + idx * yStep;
+      const isFaceUp = this.isPieceFaceUp(card.rotation) || card.metadata?.isFaceUp !== false;
+
+      if (body) {
+        body.position.set(rootX, targetY, targetZ);
+        body.quaternion.set(0, 0, isFaceUp ? 0 : 1, isFaceUp ? 1 : 0);
+        body.velocity.set(0, 0, 0);
+        body.angularVelocity.set(0, 0, 0);
+        body.wakeUp();
+      }
+
+      card.position = { x: rootX, y: targetY, z: targetZ };
+      card.rotation = isFaceUp ? { x: 0, y: 0, z: 0, w: 1 } : { x: 0, y: 0, z: 1, w: 0 };
+      if (!card.metadata) card.metadata = {};
+      card.metadata.isFaceUp = isFaceUp;
+      updatedPieces.push(card);
+    });
+
+    if (this.onSoundEventCallback) {
+      this.onSoundEventCallback('card_deal', 0.9, { x: rootX, y: baseY, z: startZ });
+    }
+
+    return { updatedPieces };
+  }
+
+  // Horizontal Splay / Fan layout (horizontal row with visible card indices)
+  public arrangeCardsFan(pieceIds: string[]): { updatedPieces: TabletopPieceData[] } {
+    if (pieceIds.length < 2) return { updatedPieces: [] };
+    const validPieces = pieceIds
+      .map((id) => this.pieceData.get(id))
+      .filter((p): p is TabletopPieceData => !!p && (p.type === 'card' || p.type === 'card_deck'));
+    if (validPieces.length < 2) return { updatedPieces: [] };
+
+    validPieces.sort((a, b) => a.position.x - b.position.x);
+
+    const startX = validPieces[0].position.x;
+    const rootZ = validPieces[0].position.z;
+    const baseY = this.tableConfig.height + 0.01;
+    const xOffset = 0.45;
+    const yStep = 0.009;
+
+    const updatedPieces: TabletopPieceData[] = [];
+    validPieces.forEach((card, idx) => {
+      const body = this.bodies.get(card.id);
+      const targetX = startX + idx * xOffset;
+      const targetY = baseY + idx * yStep;
+      const isFaceUp = this.isPieceFaceUp(card.rotation) || card.metadata?.isFaceUp !== false;
+
+      if (body) {
+        body.position.set(targetX, targetY, rootZ);
+        body.quaternion.set(0, 0, isFaceUp ? 0 : 1, isFaceUp ? 1 : 0);
+        body.velocity.set(0, 0, 0);
+        body.angularVelocity.set(0, 0, 0);
+        body.wakeUp();
+      }
+
+      card.position = { x: targetX, y: targetY, z: rootZ };
+      card.rotation = isFaceUp ? { x: 0, y: 0, z: 0, w: 1 } : { x: 0, y: 0, z: 1, w: 0 };
+      if (!card.metadata) card.metadata = {};
+      card.metadata.isFaceUp = isFaceUp;
+      updatedPieces.push(card);
+    });
+
+    if (this.onSoundEventCallback) {
+      this.onSoundEventCallback('card_deal', 0.9, { x: startX, y: baseY, z: rootZ });
+    }
+
+    return { updatedPieces };
+  }
+
+  // Auto-stack card onto card/deck, or cascade cards (FreeCell / Solitaire style)
   public checkAutoStack(pieceId: string): { createdDeck?: TabletopPieceData; removedPieceIds: string[]; updatedPieces?: TabletopPieceData[] } | null {
     const droppedPiece = this.pieceData.get(pieceId);
     if (!droppedPiece) return null;
@@ -486,10 +755,10 @@ export class TabletopPhysicsWorld {
     const dropBody = this.bodies.get(pieceId);
     if (!dropBody) return null;
 
-    // 1. Cards and Decks Stacking
+    // 1. Cards and Decks Stacking and Cascading
     if (droppedPiece.type === 'card' || droppedPiece.type === 'card_deck') {
       let targetPiece: TabletopPieceData | null = null;
-      let minDistance = 0.95;
+      let minDistance = 1.25;
 
       for (const [id, piece] of this.pieceData.entries()) {
         if (id === pieceId) continue;
@@ -501,15 +770,55 @@ export class TabletopPhysicsWorld {
         const dx = dropBody.position.x - body.position.x;
         const dz = dropBody.position.z - body.position.z;
         const dist = Math.sqrt(dx * dx + dz * dz);
+        const dy = Math.abs(dropBody.position.y - body.position.y);
 
-        if (dist < minDistance && Math.abs(dropBody.position.y - body.position.y) < 1.6) {
+        if (dist < minDistance && dy < 1.6) {
           minDistance = dist;
           targetPiece = piece;
         }
       }
 
       if (targetPiece) {
-        return this.groupPieces([targetPiece.id, pieceId]);
+        const dx = dropBody.position.x - targetPiece.position.x;
+        const dz = dropBody.position.z - targetPiece.position.z;
+        const targetBody = this.bodies.get(targetPiece.id);
+
+        // FreeCell & Solitaire Cascading Layout (Partial Stacking with Staggered Overlap)
+        // When cards are dropped with vertical offset in a column, do NOT merge into a deck!
+        // Instead, arrange them in an authentic cascade so all card faces/indices remain visible.
+        const isCascadePlacement =
+          targetPiece.type === 'card' &&
+          droppedPiece.type === 'card' &&
+          Math.abs(dx) < 0.55 &&
+          dz > 0.16 &&
+          dz < 1.15;
+
+        if (isCascadePlacement && targetBody) {
+          const cascadeZ = targetPiece.position.z + 0.42;
+          const cascadeY = targetPiece.position.y + 0.009;
+          const isFaceUp = this.isPieceFaceUp(droppedPiece.rotation);
+
+          dropBody.position.set(targetPiece.position.x, cascadeY, cascadeZ);
+          dropBody.quaternion.set(0, 0, isFaceUp ? 0 : 1, isFaceUp ? 1 : 0);
+          dropBody.velocity.set(0, 0, 0);
+          dropBody.angularVelocity.set(0, 0, 0);
+          dropBody.wakeUp();
+
+          droppedPiece.position = { x: targetPiece.position.x, y: cascadeY, z: cascadeZ };
+          droppedPiece.rotation = isFaceUp ? { x: 0, y: 0, z: 0, w: 1 } : { x: 0, y: 0, z: 1, w: 0 };
+
+          if (this.onSoundEventCallback) {
+            this.onSoundEventCallback('card_deal', 0.85, droppedPiece.position);
+          }
+
+          return { updatedPieces: [droppedPiece], removedPieceIds: [] };
+        }
+
+        // Complete Stacking (direct centered alignment or dropping onto existing deck/foundation)
+        const distXZ = Math.hypot(dx, dz);
+        if (distXZ < 0.38 || targetPiece.type === 'card_deck') {
+          return this.groupPieces([targetPiece.id, pieceId]);
+        }
       }
     }
 
@@ -781,11 +1090,24 @@ export class TabletopPhysicsWorld {
       case 'poker_chip':
         return { x: 0.75, y: 0.08, z: 0.75 };
       case 'pawn':
-        return { x: 0.6, y: 1.1, z: 0.6 };
+        return { x: 0.6, y: 0.95, z: 0.6 };
       case 'meeple':
         return { x: 0.75, y: 0.8, z: 0.3 };
-      case 'chess_piece':
-        return { x: 0.65, y: 1.3, z: 0.65 };
+      case 'chess_piece': {
+        const role = (data?.metadata?.role || data?.name || data?.label || '').toLowerCase();
+        const roleH = role.includes('king')
+          ? 1.35
+          : role.includes('queen')
+          ? 1.25
+          : role.includes('bishop')
+          ? 1.15
+          : role.includes('knight')
+          ? 1.10
+          : role.includes('rook')
+          ? 1.05
+          : 0.95;
+        return { x: 0.65, y: roleH, z: 0.65 };
+      }
       case 'counter':
         return { x: 1.1, y: 0.25, z: 1.1 };
       case 'custom_token':
@@ -794,6 +1116,8 @@ export class TabletopPhysicsWorld {
         return { x: 0.6, y: 0.15, z: 1.3 };
       case 'checker':
         return { x: 0.7, y: 0.12, z: 0.7 };
+      case 'board':
+        return { x: 9.8, y: 0.08, z: 9.8 };
       case 'block':
       default:
         return { x: 0.8, y: 0.8, z: 0.8 };
@@ -803,6 +1127,8 @@ export class TabletopPhysicsWorld {
   public startGrab(pieceId: string, playerId: string, targetPos: Vector3D) {
     const piece = this.pieceData.get(pieceId);
     if (piece?.isLocked) return; // Cannot grab locked piece
+
+    this.wakeUpRestingPiecesAbove(pieceId);
 
     const body = this.bodies.get(pieceId);
     if (!body) return;
@@ -836,7 +1162,23 @@ export class TabletopPhysicsWorld {
     if (!body) return;
 
     body.wakeUp();
-    grab.targetPos.set(targetPos.x, targetPos.y, targetPos.z);
+
+    // Clamp grabbed piece position strictly inside table boundary box
+    const piece = this.pieceData.get(pieceId);
+    const dims = piece ? this.getDefaultDimensions(piece.type) : { x: 0.5, y: 0.05, z: 0.5 };
+    const halfX = Math.max(0.04, ((piece?.dimensions?.x ?? dims.x) || 0.4) / 2);
+    const halfZ = Math.max(0.04, ((piece?.dimensions?.z ?? dims.z) || 0.4) / 2);
+    const halfH = Math.max(0.005, ((piece?.dimensions?.y ?? dims.y) || 0.02) / 2);
+
+    const { width, length, height } = this.tableConfig;
+    const halfW = width / 2;
+    const halfL = length / 2;
+
+    const clampedX = Math.max(-halfW + halfX, Math.min(halfW - halfX, targetPos.x));
+    const clampedZ = Math.max(-halfL + halfZ, Math.min(halfL - halfZ, targetPos.z));
+    const clampedY = Math.max(height + halfH, Math.min(height + 3.8, targetPos.y));
+
+    grab.targetPos.set(clampedX, clampedY, clampedZ);
     if (rotation) {
       grab.targetRot.set(rotation.x, rotation.y, rotation.z, rotation.w);
     }
@@ -994,8 +1336,8 @@ export class TabletopPhysicsWorld {
       const distFromCenter = Math.sqrt(body.position.x * body.position.x + body.position.z * body.position.z);
       const angle = Math.atan2(body.position.z, body.position.x) + (Math.random() - 0.5) * 0.5;
 
-      const horizSpeed = (4 + distFromCenter * 2 + Math.random() * 6) * force;
-      const vertSpeed = (8 + Math.random() * 7) * force;
+      const horizSpeed = (1.8 + distFromCenter * 0.8 + Math.random() * 2.2) * force;
+      const vertSpeed = (2.5 + Math.random() * 2.5) * force;
 
       body.velocity.set(
         Math.cos(angle) * horizSpeed,
@@ -1004,9 +1346,9 @@ export class TabletopPhysicsWorld {
       );
 
       body.angularVelocity.set(
-        (Math.random() - 0.5) * 35 * force,
-        (Math.random() - 0.5) * 35 * force,
-        (Math.random() - 0.5) * 35 * force
+        (Math.random() - 0.5) * 18 * force,
+        (Math.random() - 0.5) * 18 * force,
+        (Math.random() - 0.5) * 18 * force
       );
     }
 
@@ -1059,9 +1401,136 @@ export class TabletopPhysicsWorld {
       }
     }
 
+    const { width, length, height } = this.tableConfig;
+    const halfW = width / 2;
+    const halfL = length / 2;
+    const boxCeilingY = height + 4.2;
+
     for (const [id, body] of this.bodies.entries()) {
       const piece = this.pieceData.get(id);
       if (!piece) continue;
+
+      // Active containment within invisible bounding box around the table
+      if (!piece.isLocked) {
+        const dims = piece.dimensions || this.getDefaultDimensions(piece.type, piece);
+        const pieceHalfX = Math.max(0.04, ((dims.x) || 0.4) / 2);
+        const pieceHalfZ = Math.max(0.04, ((dims.z) || 0.4) / 2);
+        const pieceHalfY = Math.max(0.005, ((dims.y) || 0.02) / 2);
+
+        // Find surface elevation underneath (table top or board surface)
+        let surfaceY = height;
+        for (const b of this.pieceData.values()) {
+          if (b.type === 'board' && b.id !== id) {
+            const bDims = b.dimensions || { x: 9.8, y: 0.08, z: 9.8 };
+            const bHalfX = bDims.x / 2;
+            const bHalfZ = bDims.z / 2;
+            if (
+              body.position.x >= b.position.x - bHalfX &&
+              body.position.x <= b.position.x + bHalfX &&
+              body.position.z >= b.position.z - bHalfZ &&
+              body.position.z <= b.position.z + bHalfZ
+            ) {
+              const bTop = b.position.y + bDims.y / 2;
+              if (bTop > surfaceY) {
+                surfaceY = bTop;
+              }
+            }
+          }
+        }
+
+        const minX = -halfW + pieceHalfX;
+        const maxX = halfW - pieceHalfX;
+        const minZ = -halfL + pieceHalfZ;
+        const maxZ = halfL - pieceHalfZ;
+        const minY = surfaceY + pieceHalfY;
+        const maxY = boxCeilingY - pieceHalfY;
+
+        // X containment
+        if (body.position.x < minX) {
+          body.position.x = minX;
+          if (body.velocity.x < 0) body.velocity.x = -body.velocity.x * 0.3;
+        } else if (body.position.x > maxX) {
+          body.position.x = maxX;
+          if (body.velocity.x > 0) body.velocity.x = -body.velocity.x * 0.3;
+        }
+
+        // Z containment
+        if (body.position.z < minZ) {
+          body.position.z = minZ;
+          if (body.velocity.z < 0) body.velocity.z = -body.velocity.z * 0.3;
+        } else if (body.position.z > maxZ) {
+          body.position.z = maxZ;
+          if (body.velocity.z > 0) body.velocity.z = -body.velocity.z * 0.3;
+        }
+
+        // Ceiling containment (pieces cannot fly into outer space)
+        if (body.position.y > maxY) {
+          body.position.y = maxY;
+          if (body.velocity.y > 0) body.velocity.y = -body.velocity.y * 0.25;
+        }
+
+        // Table surface bottom containment (pieces cannot fall off the table or sink into void)
+        if (body.position.y < minY) {
+          body.position.y = minY;
+          if (body.velocity.y < 0) {
+            body.velocity.y = 0;
+            body.velocity.x *= 0.92;
+            body.velocity.z *= 0.92;
+          }
+        }
+
+        // Automatic support check for sleeping pieces in mid-air (e.g. if token beneath card was removed)
+        if (body.sleepState === CANNON.Body.SLEEPING && body.type === CANNON.Body.DYNAMIC) {
+          if (body.position.y > surfaceY + pieceHalfY + 0.03) {
+            let isSupported = false;
+            for (const [subId, subBody] of this.bodies.entries()) {
+              if (subId === id) continue;
+              const subPiece = this.pieceData.get(subId);
+              const subDims = subPiece?.dimensions || (subPiece ? this.getDefaultDimensions(subPiece.type, subPiece) : { x: 0.8, y: 0.1, z: 0.8 });
+              const subTop = subBody.position.y + subDims.y / 2;
+              const myBottom = body.position.y - pieceHalfY;
+
+              if (Math.abs(myBottom - subTop) < 0.05) {
+                const dx = Math.abs(body.position.x - subBody.position.x);
+                const dz = Math.abs(body.position.z - subBody.position.z);
+                if (dx < (pieceHalfX + subDims.x / 2) * 0.95 && dz < (pieceHalfZ + subDims.z / 2) * 0.95) {
+                  isSupported = true;
+                  break;
+                }
+              }
+            }
+
+            if (!isSupported) {
+              body.wakeUp();
+              body.velocity.y = -0.15;
+            }
+          }
+        }
+
+        // Card flatness constraint: prevent cards from tipping or seesawing when partially overlapping other cards
+        if (piece.type === 'card' && body.type === CANNON.Body.DYNAMIC && !piece.grabbedBy) {
+          body.angularVelocity.x *= 0.15;
+          body.angularVelocity.z *= 0.15;
+          const isFaceUp = this.isPieceFaceUp(body.quaternion);
+          body.quaternion.x = 0;
+          body.quaternion.z = isFaceUp ? 0 : 1;
+          body.quaternion.normalize();
+        }
+
+        // Token / Poker chip micro-jitter stabilization
+        if ((piece.type === 'poker_chip' || piece.type === 'checker' || piece.type === 'coin') && body.type === CANNON.Body.DYNAMIC && !piece.grabbedBy) {
+          const speedSq = body.velocity.lengthSquared();
+          if (speedSq < 0.04) {
+            body.velocity.x *= 0.4;
+            body.velocity.z *= 0.4;
+            if (speedSq < 0.004) {
+              body.velocity.set(0, 0, 0);
+              body.angularVelocity.set(0, 0, 0);
+              body.sleep();
+            }
+          }
+        }
+      }
 
       piece.position = { x: body.position.x, y: body.position.y, z: body.position.z };
       piece.rotation = {
@@ -1071,13 +1540,6 @@ export class TabletopPhysicsWorld {
         w: body.quaternion.w,
       };
       piece.isSleeping = body.sleepState === CANNON.Body.SLEEPING;
-
-      if (body.position.y < -5) {
-        body.position.set((Math.random() - 0.5) * 2, this.tableConfig.height + 0.8, (Math.random() - 0.5) * 2);
-        body.velocity.set(0, 0, 0);
-        body.angularVelocity.set(0, 0, 0);
-        body.wakeUp();
-      }
 
       updates.push({
         id,
